@@ -73,9 +73,9 @@ engine = create_async_engine(
     # Кеш скомпилированных запросов (правильное размещение)
     query_cache_size=500,
     connect_args=_pg_connect_args if not IS_SQLITE else {},
-    execution_options={
-        "isolation_level": "READ COMMITTED",
-    },
+    execution_options=(
+        {"isolation_level": "READ COMMITTED"} if not IS_SQLITE else {}
+    ),
     **pool_kwargs,
 )
 

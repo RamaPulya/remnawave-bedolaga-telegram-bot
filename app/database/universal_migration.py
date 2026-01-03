@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from datetime import datetime
 from typing import List, Tuple
 
@@ -11,6 +11,29 @@ from app.database.models import WebApiToken
 from app.utils.security import hash_api_token
 
 logger = logging.getLogger(__name__)
+
+
+# --- SPIDERMAN OVERRIDES: CUSTOM_MIGRATIONS HOOK START ---
+# SPIDERTEST: hook snippet from overrides
+async def _run_custom_migrations() -> bool:
+    try:
+        from app.custom_migrations.spiderman import run_spiderman_migrations
+    except Exception as exc:
+        logger.debug("Custom migrations not available: %s", exc)
+        return True
+
+    try:
+        return await run_spiderman_migrations(
+            engine=engine,
+            check_column_exists=check_column_exists,
+            get_database_type=get_database_type,
+            logger=logger,
+        )
+    except Exception as exc:
+        logger.error("Custom migrations failed: %s", exc)
+        return False
+# --- SPIDERMAN OVERRIDES: CUSTOM_MIGRATIONS HOOK END ---
+
 
 async def get_database_type():
     return engine.dialect.name
@@ -5046,6 +5069,15 @@ async def run_universal_migration():
         else:
             logger.warning("⚠️ Проблемы с таблицей Heleket payments")
 
+        # --- SPIDERMAN OVERRIDES: CUSTOM_MIGRATIONS CALL START ---
+        logger.info("=== ОБНОВЛЕНИЕ СХЕМЫ ПОДПИСОК (TARIFF/UUID) [SPIDERTEST] ===")
+        subscription_tariff_ready = await _run_custom_migrations()
+        if subscription_tariff_ready:
+            logger.info("✅ Колонки tariff_code/remnawave_uuid готовы [SPIDERTEST]")
+        else:
+            logger.warning("❌ Проблемы с колонками tariff_code/remnawave_uuid [SPIDERTEST]")
+        # --- SPIDERMAN OVERRIDES: CUSTOM_MIGRATIONS CALL END ---
+
         mulenpay_name = settings.get_mulenpay_display_name()
         logger.info("=== СОЗДАНИЕ ТАБЛИЦЫ %s ===", mulenpay_name)
         mulenpay_created = await create_mulenpay_payments_table()
@@ -5517,6 +5549,8 @@ async def check_migration_status():
             "users_promo_offer_discount_expires_column": False,
             "users_referral_commission_percent_column": False,
             "users_notification_settings_column": False,
+            "subscription_tariff_code_column": False,
+            "subscription_remnawave_uuid_column": False,
             "subscription_crypto_link_column": False,
             "subscription_modem_enabled_column": False,
             "subscription_purchased_traffic_column": False,
@@ -5585,6 +5619,8 @@ async def check_migration_status():
         status["users_promo_offer_discount_expires_column"] = await check_column_exists('users', 'promo_offer_discount_expires_at')
         status["users_referral_commission_percent_column"] = await check_column_exists('users', 'referral_commission_percent')
         status["users_notification_settings_column"] = await check_column_exists('users', 'notification_settings')
+        status["subscription_tariff_code_column"] = await check_column_exists('subscriptions', 'tariff_code')
+        status["subscription_remnawave_uuid_column"] = await check_column_exists('subscriptions', 'remnawave_uuid')
         status["subscription_crypto_link_column"] = await check_column_exists('subscriptions', 'subscription_crypto_link')
         status["subscription_modem_enabled_column"] = await check_column_exists('subscriptions', 'modem_enabled')
         status["subscription_purchased_traffic_column"] = await check_column_exists('subscriptions', 'purchased_traffic_gb')
@@ -5669,6 +5705,8 @@ async def check_migration_status():
             "users_promo_offer_discount_expires_column": "Колонка срока действия промо-скидки у пользователей",
             "users_referral_commission_percent_column": "Колонка процента реферальной комиссии у пользователей",
             "users_notification_settings_column": "Колонка notification_settings у пользователей",
+            "subscription_tariff_code_column": "Колонка tariff_code в subscriptions",
+            "subscription_remnawave_uuid_column": "Колонка remnawave_uuid в subscriptions",
             "subscription_crypto_link_column": "Колонка subscription_crypto_link в subscriptions",
             "subscription_modem_enabled_column": "Колонка modem_enabled в subscriptions",
             "subscription_purchased_traffic_column": "Колонка purchased_traffic_gb в subscriptions",

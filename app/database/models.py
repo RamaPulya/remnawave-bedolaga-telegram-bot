@@ -765,9 +765,21 @@ class User(Base):
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "tariff_code",
+            name="uq_subscriptions_user_id_tariff_code",
+        ),
+        UniqueConstraint(
+            "remnawave_uuid",
+            name="uq_subscriptions_remnawave_uuid",
+        ),
+    )
     
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    tariff_code = Column(String(20), nullable=False, default="standard")
     
     status = Column(String(20), default=SubscriptionStatus.TRIAL.value)
     is_trial = Column(Boolean, default=True)
@@ -793,6 +805,7 @@ class Subscription(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     
+    remnawave_uuid = Column(String(255), nullable=True)
     remnawave_short_uuid = Column(String(255), nullable=True)
 
     user = relationship("User", back_populates="subscription")

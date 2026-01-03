@@ -18,6 +18,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    ports:
+      - "5444:5432"
 
   redis:
     image: redis:7-alpine
@@ -33,6 +35,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    ports:
+      - "6380:6379"
 
   bot:
     build: .

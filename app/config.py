@@ -1,4 +1,4 @@
-import hashlib
+﻿import hashlib
 import hmac
 import logging
 import math
@@ -448,6 +448,13 @@ class Settings(BaseSettings):
     LOG_PAYMENTS_FILE: str = "payments.log"
 
     DEBUG: bool = False
+    # --- SPIDERMAN OVERRIDES: CONFIG FLAGS START ---
+    SPIDERMAN_MODE: bool = False
+    MULTI_TARIFF_ENABLED: bool = False
+    WHITE_TARIFF_SUFFIX: str = "_w"
+    STANDARD_TARIFF_TAG: Optional[str] = None
+    WHITE_TARIFF_TAG: Optional[str] = None
+    # --- SPIDERMAN OVERRIDES: CONFIG FLAGS END ---
     WEBHOOK_URL: Optional[str] = None
     WEBHOOK_PATH: str = "/webhook"
     WEBHOOK_SECRET_TOKEN: Optional[str] = None
