@@ -451,9 +451,13 @@ class Settings(BaseSettings):
     # --- SPIDERMAN OVERRIDES: CONFIG FLAGS START ---
     SPIDERMAN_MODE: bool = False
     MULTI_TARIFF_ENABLED: bool = False
+    SPIDERMAN_ALWAYS_SHOW_BUY_SUBSCRIPTION: bool = False
+    SPIDERMAN_HIDE_BUY_TRAFFIC: bool = False
     WHITE_TARIFF_SUFFIX: str = "_w"
     STANDARD_TARIFF_TAG: Optional[str] = None
     WHITE_TARIFF_TAG: Optional[str] = None
+    STANDARD_TARIFF_SQUADS: str = ""
+    WHITE_TARIFF_SQUADS: str = ""
     # --- SPIDERMAN OVERRIDES: CONFIG FLAGS END ---
     WEBHOOK_URL: Optional[str] = None
     WEBHOOK_PATH: str = "/webhook"

@@ -390,8 +390,8 @@ class RemnaWaveAPI:
                 
                 if response.status >= 400:
                     error_message = response_data.get('message', f'HTTP {response.status}')
-                    logger.error(f"API Error {response.status}: {error_message}")
-                    logger.error(f"Response: {response_text[:500]}")
+                    logger.error(f"❌ Ошибка RemnaWave API {response.status}: {error_message}")
+                    logger.error(f"📨 Ответ: {response_text[:500]}")
                     raise RemnaWaveAPIError(
                         error_message, 
                         response.status, 
@@ -401,7 +401,7 @@ class RemnaWaveAPI:
                 return response_data
                 
         except aiohttp.ClientError as e:
-            logger.error(f"Request failed: {e}")
+            logger.error(f"❌ Ошибка запроса к RemnaWave: {e}")
             raise RemnaWaveAPIError(f"Request failed: {str(e)}")
     
     
@@ -431,7 +431,7 @@ class RemnaWaveAPI:
             data['telegramId'] = telegram_id
         if email:
             data['email'] = email
-        if hwid_device_limit:
+        if hwid_device_limit is not None:
             data['hwidDeviceLimit'] = hwid_device_limit
         if description:
             data['description'] = description

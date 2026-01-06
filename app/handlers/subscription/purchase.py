@@ -3684,6 +3684,11 @@ def register_handlers(dp: Dispatcher):
     )
 
     dp.callback_query.register(
+        extend_standard_back,
+        F.data == "extend_standard_back"
+    )
+
+    dp.callback_query.register(
         confirm_reset_traffic,
         F.data == "confirm_reset_traffic"
     )

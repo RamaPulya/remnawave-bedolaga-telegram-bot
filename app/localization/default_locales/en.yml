@@ -40,4 +40,10 @@ PAYMENT_METHODS_NONE_AVAILABLE: |
 
   Choose a top-up option:
 SUPPORT_TOPUP_DISABLED: "Top-ups via support are disabled. Please use another payment method."
+SUBSCRIPTION_TARIFF_SELECT_PROMPT: |
+  💎 <b>Subscription setup</b>
+
+  Let’s tailor your subscription to your needs.
+
+  First, choose the subscription type:
 

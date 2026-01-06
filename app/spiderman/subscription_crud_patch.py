@@ -37,7 +37,7 @@ async def get_subscription_by_user_id(
 
     if subscription:
         logger.info(
-            "Loaded subscription %s for user %s (tariff=%s, status=%s)",
+            "🔍 Загружена подписка %s для пользователя %s (тариф=%s, статус=%s)",
             subscription.id,
             user_id,
             tariff_code,
@@ -103,13 +103,13 @@ async def create_trial_subscription(
 
             if squad_uuid:
                 logger.debug(
-                    "Selected squad %s for trial subscription user %s",
+                    "🔍 Выбран сквад %s для триала пользователя %s",
                     squad_uuid,
                     user_id,
                 )
         except Exception as error:
             logger.error(
-                "Failed to fetch squad for trial subscription user %s: %s",
+                "❌ Не удалось получить сквад для триала пользователя %s: %s",
                 user_id,
                 error,
             )
@@ -135,7 +135,7 @@ async def create_trial_subscription(
     await db.refresh(subscription)
 
     logger.info(
-        "Created trial subscription for user %s (tariff=%s, id=%s)",
+        "🎁 Создана триальная подписка для пользователя %s (тариф=%s, id=%s)",
         user_id,
         tariff_code,
         subscription.id,
@@ -152,17 +152,17 @@ async def create_trial_subscription(
             if server_ids:
                 await add_user_to_servers(db, server_ids)
                 logger.info(
-                    "Updated users counter for trial squad %s",
+                    "✅ Обновлен счетчик пользователей для trial сквада %s",
                     squad_uuid,
                 )
             else:
                 logger.warning(
-                    "No servers found for users counter update (squad %s)",
+                    "⚠️ Не найдены серверы для обновления счетчика (сквад %s)",
                     squad_uuid,
                 )
         except Exception as error:
             logger.error(
-                "Failed to update trial squad counter %s: %s",
+                "❌ Не удалось обновить счетчик trial сквада %s: %s",
                 squad_uuid,
                 error,
             )
@@ -206,7 +206,7 @@ async def create_paid_subscription(
     await db.refresh(subscription)
 
     logger.info(
-        "Created paid subscription for user %s (tariff=%s, id=%s, status=%s)",
+        "💎 Создана платная подписка для пользователя %s (тариф=%s, id=%s, статус=%s)",
         user_id,
         tariff_code,
         subscription.id,
@@ -225,19 +225,19 @@ async def create_paid_subscription(
             if server_ids:
                 await add_user_to_servers(db, server_ids)
                 logger.info(
-                    "Updated users counter for paid subscription user %s (squads: %s)",
+                    "✅ Обновлен счетчик пользователей для платной подписки пользователя %s (сквады: %s)",
                     user_id,
                     squad_uuids,
                 )
             else:
                 logger.warning(
-                    "No servers found for paid subscription user %s (squads: %s)",
+                    "⚠️ Не найдены серверы для платной подписки пользователя %s (сквады: %s)",
                     user_id,
                     squad_uuids,
                 )
         except Exception as error:
             logger.error(
-                "Failed to update paid subscription counters for user %s: %s",
+                "❌ Не удалось обновить счетчики платной подписки пользователя %s: %s",
                 user_id,
                 error,
             )

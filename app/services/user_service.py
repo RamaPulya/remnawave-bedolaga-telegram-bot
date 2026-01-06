@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,31 +41,31 @@ class UserService:
         amount_kopeks: int,
         admin_name: str
     ) -> bool:
-        """Отправляет уведомление пользователю о пополнении/списании баланса"""
+        """╨Ю╤В╨┐╤А╨░╨▓╨╗╤П╨╡╤В ╤Г╨▓╨╡╨┤╨╛╨╝╨╗╨╡╨╜╨╕╨╡ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤О ╨╛ ╨┐╨╛╨┐╨╛╨╗╨╜╨╡╨╜╨╕╨╕/╤Б╨┐╨╕╤Б╨░╨╜╨╕╨╕ ╨▒╨░╨╗╨░╨╜╤Б╨░"""
         try:
             if amount_kopeks > 0:
-                # Пополнение
-                emoji = "💰"
-                action = "пополнен"
+                # ╨Я╨╛╨┐╨╛╨╗╨╜╨╡╨╜╨╕╨╡
+                emoji = "ЁЯТ░"
+                action = "╨┐╨╛╨┐╨╛╨╗╨╜╨╡╨╜"
                 amount_text = f"+{settings.format_price(amount_kopeks)}"
                 message = (
-                    f"{emoji} <b>Баланс пополнен!</b>\n\n"
-                    f"💵 <b>Сумма:</b> {amount_text}\n"
-                    f"👤 <b>Администратор:</b> {admin_name}\n"
-                    f"💳 <b>Текущий баланс:</b> {settings.format_price(user.balance_kopeks)}\n\n"
-                    f"Спасибо за использование нашего сервиса! 🎉"
+                    f"{emoji} <b>╨С╨░╨╗╨░╨╜╤Б ╨┐╨╛╨┐╨╛╨╗╨╜╨╡╨╜!</b>\n\n"
+                    f"ЁЯТ╡ <b>╨б╤Г╨╝╨╝╨░:</b> {amount_text}\n"
+                    f"ЁЯСд <b>╨Р╨┤╨╝╨╕╨╜╨╕╤Б╤В╤А╨░╤В╨╛╤А:</b> {admin_name}\n"
+                    f"ЁЯТ│ <b>╨в╨╡╨║╤Г╤Й╨╕╨╣ ╨▒╨░╨╗╨░╨╜╤Б:</b> {settings.format_price(user.balance_kopeks)}\n\n"
+                    f"╨б╨┐╨░╤Б╨╕╨▒╨╛ ╨╖╨░ ╨╕╤Б╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╨╜╨╕╨╡ ╨╜╨░╤И╨╡╨│╨╛ ╤Б╨╡╤А╨▓╨╕╤Б╨░! ЁЯОЙ"
                 )
             else:
-                # Списание
-                emoji = "💸"
-                action = "списан"
+                # ╨б╨┐╨╕╤Б╨░╨╜╨╕╨╡
+                emoji = "ЁЯТ╕"
+                action = "╤Б╨┐╨╕╤Б╨░╨╜"
                 amount_text = f"-{settings.format_price(abs(amount_kopeks))}"
                 message = (
-                    f"{emoji} <b>Средства списаны с баланса</b>\n\n"
-                    f"💵 <b>Сумма:</b> {amount_text}\n"
-                    f"👤 <b>Администратор:</b> {admin_name}\n"
-                    f"💳 <b>Текущий баланс:</b> {settings.format_price(user.balance_kopeks)}\n\n"
-                    f"Если у вас есть вопросы, обратитесь в поддержку."
+                    f"{emoji} <b>╨б╤А╨╡╨┤╤Б╤В╨▓╨░ ╤Б╨┐╨╕╤Б╨░╨╜╤Л ╤Б ╨▒╨░╨╗╨░╨╜╤Б╨░</b>\n\n"
+                    f"ЁЯТ╡ <b>╨б╤Г╨╝╨╝╨░:</b> {amount_text}\n"
+                    f"ЁЯСд <b>╨Р╨┤╨╝╨╕╨╜╨╕╤Б╤В╤А╨░╤В╨╛╤А:</b> {admin_name}\n"
+                    f"ЁЯТ│ <b>╨в╨╡╨║╤Г╤Й╨╕╨╣ ╨▒╨░╨╗╨░╨╜╤Б:</b> {settings.format_price(user.balance_kopeks)}\n\n"
+                    f"╨Х╤Б╨╗╨╕ ╤Г ╨▓╨░╤Б ╨╡╤Б╤В╤М ╨▓╨╛╨┐╤А╨╛╤Б╤Л, ╨╛╨▒╤А╨░╤В╨╕╤В╨╡╤Б╤М ╨▓ ╨┐╨╛╨┤╨┤╨╡╤А╨╢╨║╤Г."
                 )
 
             keyboard_rows = []
@@ -76,7 +76,7 @@ class UserService:
             }:
                 keyboard_rows.append([
                     types.InlineKeyboardButton(
-                        text=get_texts(user.language).t("SUBSCRIPTION_EXTEND", "💎 Продлить подписку"),
+                        text=get_texts(user.language).t("SUBSCRIPTION_EXTEND", "ЁЯТО ╨Я╤А╨╛╨┤╨╗╨╕╤В╤М ╨┐╨╛╨┤╨┐╨╕╤Б╨║╤Г"),
                         callback_data="subscription_extend",
                     )
                 ])
@@ -94,17 +94,17 @@ class UserService:
                 reply_markup=reply_markup,
             )
             
-            logger.info(f"✅ Уведомление о изменении баланса отправлено пользователю {user.telegram_id}")
+            logger.info(f"тЬЕ ╨г╨▓╨╡╨┤╨╛╨╝╨╗╨╡╨╜╨╕╨╡ ╨╛ ╨╕╨╖╨╝╨╡╨╜╨╡╨╜╨╕╨╕ ╨▒╨░╨╗╨░╨╜╤Б╨░ ╨╛╤В╨┐╤А╨░╨▓╨╗╨╡╨╜╨╛ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤О {user.telegram_id}")
             return True
             
         except TelegramForbiddenError:
-            logger.warning(f"⚠️ Пользователь {user.telegram_id} заблокировал бота")
+            logger.warning(f"тЪая╕П ╨Я╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤М {user.telegram_id} ╨╖╨░╨▒╨╗╨╛╨║╨╕╤А╨╛╨▓╨░╨╗ ╨▒╨╛╤В╨░")
             return False
         except TelegramBadRequest as e:
-            logger.error(f"❌ Ошибка Telegram API при отправке уведомления пользователю {user.telegram_id}: {e}")
+            logger.error(f"тЭМ ╨Ю╤И╨╕╨▒╨║╨░ Telegram API ╨┐╤А╨╕ ╨╛╤В╨┐╤А╨░╨▓╨║╨╡ ╤Г╨▓╨╡╨┤╨╛╨╝╨╗╨╡╨╜╨╕╤П ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤О {user.telegram_id}: {e}")
             return False
         except Exception as e:
-            logger.error(f"❌ Неожиданная ошибка при отправке уведомления пользователю {user.telegram_id}: {e}")
+            logger.error(f"тЭМ ╨Э╨╡╨╛╨╢╨╕╨┤╨░╨╜╨╜╨░╤П ╨╛╤И╨╕╨▒╨║╨░ ╨┐╤А╨╕ ╨╛╤В╨┐╤А╨░╨▓╨║╨╡ ╤Г╨▓╨╡╨┤╨╛╨╝╨╗╨╡╨╜╨╕╤П ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤О {user.telegram_id}: {e}")
             return False
     
     async def get_user_profile(
@@ -129,7 +129,7 @@ class UserService:
             }
             
         except Exception as e:
-            logger.error(f"Ошибка получения профиля пользователя {user_id}: {e}")
+            logger.error(f"╨Ю╤И╨╕╨▒╨║╨░ ╨┐╨╛╨╗╤Г╤З╨╡╨╜╨╕╤П ╨┐╤А╨╛╤Д╨╕╨╗╤П ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤П {user_id}: {e}")
             return None
     
     async def search_users(
@@ -159,7 +159,7 @@ class UserService:
             }
             
         except Exception as e:
-            logger.error(f"Ошибка поиска пользователей: {e}")
+            logger.error(f"╨Ю╤И╨╕╨▒╨║╨░ ╨┐╨╛╨╕╤Б╨║╨░ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╣: {e}")
             return {
                 "users": [],
                 "current_page": 1,
@@ -209,7 +209,7 @@ class UserService:
             }
             
         except Exception as e:
-            logger.error(f"Ошибка получения страницы пользователей: {e}")
+            logger.error(f"╨Ю╤И╨╕╨▒╨║╨░ ╨┐╨╛╨╗╤Г╤З╨╡╨╜╨╕╤П ╤Б╤В╤А╨░╨╜╨╕╤Ж╤Л ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╣: {e}")
             return {
                 "users": [],
                 "current_page": 1,
@@ -226,7 +226,7 @@ class UserService:
         page: int = 1,
         limit: int = 10,
     ) -> Dict[str, Any]:
-        """Возвращает пользователей с истекшей подпиской и достаточным балансом."""
+        """╨Т╨╛╨╖╨▓╤А╨░╤Й╨░╨╡╤В ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╣ ╤Б ╨╕╤Б╤В╨╡╨║╤И╨╡╨╣ ╨┐╨╛╨┤╨┐╨╕╤Б╨║╨╛╨╣ ╨╕ ╨┤╨╛╤Б╤В╨░╤В╨╛╤З╨╜╤Л╨╝ ╨▒╨░╨╗╨░╨╜╤Б╨╛╨╝."""
         try:
             offset = (page - 1) * limit
             now = datetime.utcnow()
@@ -265,7 +265,7 @@ class UserService:
             }
 
         except Exception as e:
-            logger.error(f"Ошибка получения пользователей для продления: {e}")
+            logger.error(f"╨Ю╤И╨╕╨▒╨║╨░ ╨┐╨╛╨╗╤Г╤З╨╡╨╜╨╕╤П ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╣ ╨┤╨╗╤П ╨┐╤А╨╛╨┤╨╗╨╡╨╜╨╕╤П: {e}")
             return {
                 "users": [],
                 "current_page": 1,
@@ -281,7 +281,7 @@ class UserService:
         try:
             return await get_users_spending_stats(db, user_ids)
         except Exception as e:
-            logger.error(f"Ошибка получения статистики трат пользователей: {e}")
+            logger.error(f"╨Ю╤И╨╕╨▒╨║╨░ ╨┐╨╛╨╗╤Г╤З╨╡╨╜╨╕╤П ╤Б╤В╨░╤В╨╕╤Б╤В╨╕╨║╨╕ ╤В╤А╨░╤В ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╣: {e}")
             return {}
 
     async def get_users_by_campaign_page(
@@ -365,7 +365,7 @@ class UserService:
             }
 
         except Exception as e:
-            logger.error(f"Ошибка получения пользователей по кампаниям: {e}")
+            logger.error(f"╨Ю╤И╨╕╨▒╨║╨░ ╨┐╨╛╨╗╤Г╤З╨╡╨╜╨╕╤П ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╣ ╨┐╨╛ ╨║╨░╨╝╨┐╨░╨╜╨╕╤П╨╝: {e}")
             return {
                 "users": [],
                 "campaigns": {},
@@ -391,7 +391,7 @@ class UserService:
             if not user:
                 return False
 
-            # Сохраняем старый баланс для уведомления
+            # ╨б╨╛╤Е╤А╨░╨╜╤П╨╡╨╝ ╤Б╤В╨░╤А╤Л╨╣ ╨▒╨░╨╗╨░╨╜╤Б ╨┤╨╗╤П ╤Г╨▓╨╡╨┤╨╛╨╝╨╗╨╡╨╜╨╕╤П
             old_balance = user.balance_kopeks
 
             if amount_kopeks > 0:
@@ -400,7 +400,7 @@ class UserService:
                     description=description,
                     payment_method=PaymentMethod.MANUAL
                 )
-                logger.info(f"Админ {admin_id} пополнил баланс пользователя {user_id} на {amount_kopeks/100}₽")
+                logger.info(f"╨Р╨┤╨╝╨╕╨╜ {admin_id} ╨┐╨╛╨┐╨╛╨╗╨╜╨╕╨╗ ╨▒╨░╨╗╨░╨╜╤Б ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤П {user_id} ╨╜╨░ {amount_kopeks/100}тВ╜")
                 success = True
             else:
                 success = await subtract_user_balance(
@@ -412,25 +412,25 @@ class UserService:
                     payment_method=PaymentMethod.MANUAL,
                 )
                 if success:
-                    logger.info(f"Админ {admin_id} списал с баланса пользователя {user_id} {abs(amount_kopeks)/100}₽")
+                    logger.info(f"╨Р╨┤╨╝╨╕╨╜ {admin_id} ╤Б╨┐╨╕╤Б╨░╨╗ ╤Б ╨▒╨░╨╗╨░╨╜╤Б╨░ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤П {user_id} {abs(amount_kopeks)/100}тВ╜")
 
-            # Отправляем уведомление пользователю, если операция прошла успешно
+            # ╨Ю╤В╨┐╤А╨░╨▓╨╗╤П╨╡╨╝ ╤Г╨▓╨╡╨┤╨╛╨╝╨╗╨╡╨╜╨╕╨╡ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤О, ╨╡╤Б╨╗╨╕ ╨╛╨┐╨╡╤А╨░╤Ж╨╕╤П ╨┐╤А╨╛╤И╨╗╨░ ╤Г╤Б╨┐╨╡╤И╨╜╨╛
             if success and bot:
-                # Обновляем пользователя для получения нового баланса
+                # ╨Ю╨▒╨╜╨╛╨▓╨╗╤П╨╡╨╝ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤П ╨┤╨╗╤П ╨┐╨╛╨╗╤Г╤З╨╡╨╜╨╕╤П ╨╜╨╛╨▓╨╛╨│╨╛ ╨▒╨░╨╗╨░╨╜╤Б╨░
                 await db.refresh(user)
 
-                # Получаем имя администратора
+                # ╨Я╨╛╨╗╤Г╤З╨░╨╡╨╝ ╨╕╨╝╤П ╨░╨┤╨╝╨╕╨╜╨╕╤Б╤В╤А╨░╤В╨╛╤А╨░
                 if not admin_name:
                     admin_user = await get_user_by_id(db, admin_id)
-                    admin_name = admin_user.full_name if admin_user else f"Админ #{admin_id}"
+                    admin_name = admin_user.full_name if admin_user else f"╨Р╨┤╨╝╨╕╨╜ #{admin_id}"
 
-                # Отправляем уведомление (не блокируем операцию если не удалось отправить)
+                # ╨Ю╤В╨┐╤А╨░╨▓╨╗╤П╨╡╨╝ ╤Г╨▓╨╡╨┤╨╛╨╝╨╗╨╡╨╜╨╕╨╡ (╨╜╨╡ ╨▒╨╗╨╛╨║╨╕╤А╤Г╨╡╨╝ ╨╛╨┐╨╡╤А╨░╤Ж╨╕╤О ╨╡╤Б╨╗╨╕ ╨╜╨╡ ╤Г╨┤╨░╨╗╨╛╤Б╤М ╨╛╤В╨┐╤А╨░╨▓╨╕╤В╤М)
                 await self._send_balance_notification(bot, user, amount_kopeks, admin_name)
 
             return success
 
         except Exception as e:
-            logger.error(f"Ошибка изменения баланса пользователя: {e}")
+            logger.error(f"╨Ю╤И╨╕╨▒╨║╨░ ╨╕╨╖╨╝╨╡╨╜╨╡╨╜╨╕╤П ╨▒╨░╨╗╨░╨╜╤Б╨░ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤П: {e}")
             return False
 
     async def update_user_promo_group(
@@ -458,7 +458,7 @@ class UserService:
             await db.refresh(user)
 
             logger.info(
-                "👥 Промогруппа пользователя %s обновлена на '%s'",
+                "ЁЯСе ╨Я╤А╨╛╨╝╨╛╨│╤А╤Г╨┐╨┐╨░ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤П %s ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨░ ╨╜╨░ '%s'",
                 user.telegram_id,
                 promo_group.name,
             )
@@ -467,7 +467,7 @@ class UserService:
 
         except Exception as e:
             await db.rollback()
-            logger.error(f"Ошибка обновления промогруппы пользователя {user_id}: {e}")
+            logger.error(f"╨Ю╤И╨╕╨▒╨║╨░ ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╤П ╨┐╤А╨╛╨╝╨╛╨│╤А╤Г╨┐╨┐╤Л ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤П {user_id}: {e}")
             return False, None, None, None
 
     async def update_user_referrals(
@@ -513,7 +513,7 @@ class UserService:
             await db.commit()
 
             logger.info(
-                "Админ %s обновил рефералов пользователя %s: добавлено %s, удалено %s, всего %s",
+                "╨Р╨┤╨╝╨╕╨╜ %s ╨╛╨▒╨╜╨╛╨▓╨╕╨╗ ╤А╨╡╤Д╨╡╤А╨░╨╗╨╛╨▓ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤П %s: ╨┤╨╛╨▒╨░╨▓╨╗╨╡╨╜╨╛ %s, ╤Г╨┤╨░╨╗╨╡╨╜╨╛ %s, ╨▓╤Б╨╡╨│╨╛ %s",
                 admin_id,
                 user_id,
                 len(to_add),
@@ -530,7 +530,7 @@ class UserService:
         except Exception as e:
             await db.rollback()
             logger.error(
-                "Ошибка обновления рефералов пользователя %s: %s",
+                "╨Ю╤И╨╕╨▒╨║╨░ ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╤П ╤А╨╡╤Д╨╡╤А╨░╨╗╨╛╨▓ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤П %s: %s",
                 user_id,
                 e,
             )
@@ -541,7 +541,7 @@ class UserService:
         db: AsyncSession,
         user_id: int,
         admin_id: int,
-        reason: str = "Заблокирован администратором"
+        reason: str = "╨Ч╨░╨▒╨╗╨╛╨║╨╕╤А╨╛╨▓╨░╨╜ ╨░╨┤╨╝╨╕╨╜╨╕╤Б╤В╤А╨░╤В╨╛╤А╨╛╨╝"
     ) -> bool:
         try:
             user = await get_user_by_id(db, user_id)
@@ -553,7 +553,9 @@ class UserService:
                     from app.services.subscription_service import SubscriptionService
                     subscription_service = SubscriptionService()
                     await subscription_service.disable_remnawave_user(user.remnawave_uuid)
-                    logger.info(f"✅ RemnaWave пользователь {user.remnawave_uuid} деактивирован при блокировке")
+                    logger.info(
+                        f"✅ RemnaWave пользователь {user.remnawave_uuid} деактивирован при блокировке"
+                    )
                 except Exception as e:
                     logger.error(f"❌ Ошибка деактивации RemnaWave пользователя при блокировке: {e}")
             
@@ -563,11 +565,11 @@ class UserService:
             
             await update_user(db, user, status=UserStatus.BLOCKED.value)
             
-            logger.info(f"Админ {admin_id} заблокировал пользователя {user_id}: {reason}")
+            logger.info(f"╨Р╨┤╨╝╨╕╨╜ {admin_id} ╨╖╨░╨▒╨╗╨╛╨║╨╕╤А╨╛╨▓╨░╨╗ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤П {user_id}: {reason}")
             return True
             
         except Exception as e:
-            logger.error(f"Ошибка блокировки пользователя: {e}")
+            logger.error(f"╨Ю╤И╨╕╨▒╨║╨░ ╨▒╨╗╨╛╨║╨╕╤А╨╛╨▓╨║╨╕ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤П: {e}")
             return False
     
     async def unblock_user(
@@ -591,24 +593,28 @@ class UserService:
                     user.subscription.status = SubscriptionStatus.ACTIVE.value
                     await db.commit()
                     await db.refresh(user.subscription)
-                    logger.info(f"🔄 Подписка пользователя {user_id} восстановлена")
+                    logger.info(f"✅ Подписка пользователя {user_id} активна после разблокировки")
                     
                     if user.remnawave_uuid:
                         try:
                             from app.services.subscription_service import SubscriptionService
                             subscription_service = SubscriptionService()
                             await subscription_service.update_remnawave_user(db, user.subscription)
-                            logger.info(f"✅ RemnaWave пользователь {user.remnawave_uuid} восстановлен при разблокировке")
+                            logger.info(
+                                f"✅ RemnaWave пользователь {user.remnawave_uuid} восстановлен при разблокировке"
+                            )
                         except Exception as e:
-                            logger.error(f"❌ Ошибка восстановления RemnaWave пользователя при разблокировке: {e}")
+                            logger.error(
+                                f"❌ Ошибка восстановления RemnaWave пользователя при разблокировке: {e}"
+                            )
                 else:
-                    logger.info(f"⏰ Подписка пользователя {user_id} истекла, восстановление невозможно")
+                    logger.info(f"⚠️ Подписка пользователя {user_id} истекла, пользователь разблокирован")
             
-            logger.info(f"Админ {admin_id} разблокировал пользователя {user_id}")
+            logger.info(f"✅ Администратор {admin_id} разблокировал пользователя {user_id}")
             return True
             
         except Exception as e:
-            logger.error(f"Ошибка разблокировки пользователя: {e}")
+            logger.error(f"❌ Ошибка разблокировки пользователя: {e}")
             return False
     
     async def delete_user_account(
@@ -620,46 +626,109 @@ class UserService:
         try:
             user = await get_user_by_id(db, user_id)
             if not user:
-                logger.warning(f"Пользователь {user_id} не найден для удаления")
+                logger.warning(f"⚠️ Пользователь {user_id} не найден для удаления")
                 return False
+
+            subscriptions_result = await db.execute(
+                select(Subscription).where(Subscription.user_id == user_id)
+            )
+            subscriptions = subscriptions_result.scalars().all()
+
             
-            logger.info(f"🗑️ Начинаем полное удаление пользователя {user_id} (Telegram ID: {user.telegram_id})")
+            logger.info(
+                f"🗑️ Начинаем полное удаление пользователя {user_id} (Telegram ID: {user.telegram_id})"
+            )
             
+            remnawave_uuids = set()
+            remnawave_usernames = set()
+            base_panel_username = None
             if user.remnawave_uuid:
-                from app.config import settings
-                delete_mode = settings.get_remnawave_user_delete_mode()
-                
+                remnawave_uuids.add(user.remnawave_uuid)
+            if subscriptions:
+                base_panel_username = settings.format_remnawave_username(
+                    full_name=user.full_name,
+                    username=user.username,
+                    telegram_id=user.telegram_id,
+                )
+            for subscription in subscriptions:
+                uuid_value = getattr(subscription, "remnawave_uuid", None)
+                if uuid_value:
+                    remnawave_uuids.add(uuid_value)
+                    continue
+                if not base_panel_username:
+                    continue
+                tariff_code = (getattr(subscription, "tariff_code", "") or "").lower()
+                username = base_panel_username
+                if tariff_code == "white":
+                    suffix = (settings.WHITE_TARIFF_SUFFIX or "_w").strip()
+                    if not suffix:
+                        suffix = "_w"
+                    if not suffix.startswith("_"):
+                        suffix = "_" + suffix.lstrip("._-")
+                    if not username.lower().endswith(suffix.lower()):
+                        username = f"{username}{suffix}"
+                remnawave_usernames.add(username[:64])
+
+            if remnawave_usernames:
                 try:
                     from app.services.remnawave_service import RemnaWaveService
                     remnawave_service = RemnaWaveService()
-                    
-                    if delete_mode == "delete":
-                        # Удаляем пользователя из панели Remnawave
-                        async with remnawave_service.get_api_client() as api:
-                            delete_success = await api.delete_user(user.remnawave_uuid)
-                            if delete_success:
-                                logger.info(f"✅ RemnaWave пользователь {user.remnawave_uuid} удален из панели")
-                            else:
-                                logger.warning(f"⚠️ Не удалось удалить пользователя {user.remnawave_uuid} из панели Remnawave")
-                    else:
-                        # Деактивируем пользователя в панели Remnawave
-                        from app.services.subscription_service import SubscriptionService
-                        subscription_service = SubscriptionService()
-                        await subscription_service.disable_remnawave_user(user.remnawave_uuid)
-                        logger.info(f"✅ RemnaWave пользователь {user.remnawave_uuid} деактивирован (режим: {delete_mode})")
-                    
+                    async with remnawave_service.get_api_client() as api:
+                        for username in remnawave_usernames:
+                            try:
+                                remnawave_user = await api.get_user_by_username(username)
+                                if remnawave_user and remnawave_user.uuid:
+                                    remnawave_uuids.add(remnawave_user.uuid)
+                                else:
+                                    logger.warning(
+                                        "⚠️ RemnaWave пользователь не найден по username %s",
+                                        username,
+                                    )
+                            except Exception as e:
+                                logger.warning(
+                                    "❌ Ошибка поиска RemnaWave по username %s: %s",
+                                    username,
+                                    e,
+                                )
                 except Exception as e:
-                    logger.warning(f"⚠️ Ошибка обработки пользователя в Remnawave (режим: {delete_mode}): {e}")
-                    # Если основное действие не удалось, попытаемся хотя бы деактивировать
-                    if delete_mode == "delete":
-                        try:
+                    logger.warning("⚠️ Пропуск поиска RemnaWave по username: %s", e)
+
+            if remnawave_uuids:
+                delete_mode = settings.get_remnawave_user_delete_mode()
+
+                for remnawave_uuid in remnawave_uuids:
+                    try:
+                        from app.services.remnawave_service import RemnaWaveService
+                        remnawave_service = RemnaWaveService()
+
+                        if delete_mode == "delete":
+                            async with remnawave_service.get_api_client() as api:
+                                delete_success = await api.delete_user(remnawave_uuid)
+                                if delete_success:
+                                    logger.info(f"✅ RemnaWave пользователь {remnawave_uuid} удален")
+                                else:
+                                    logger.warning(f"❌ Не удалось удалить RemnaWave пользователя {remnawave_uuid}")
+                        else:
                             from app.services.subscription_service import SubscriptionService
                             subscription_service = SubscriptionService()
-                            await subscription_service.disable_remnawave_user(user.remnawave_uuid)
-                            logger.info(f"✅ RemnaWave пользователь {user.remnawave_uuid} деактивирован как fallback")
-                        except Exception as fallback_e:
-                            logger.error(f"❌ Ошибка деактивации RemnaWave как fallback: {fallback_e}")
-            
+                            await subscription_service.disable_remnawave_user(remnawave_uuid)
+                            logger.info(f"⛔ RemnaWave пользователь {remnawave_uuid} отключен (режим: {delete_mode})")
+
+                    except Exception as e:
+                        logger.warning(
+                            f"⚠️ Ошибка очистки RemnaWave (режим: {delete_mode}) для {remnawave_uuid}: {e}"
+                        )
+                        if delete_mode == "delete":
+                            try:
+                                from app.services.subscription_service import SubscriptionService
+                                subscription_service = SubscriptionService()
+                                await subscription_service.disable_remnawave_user(remnawave_uuid)
+                                logger.info(f"⛔ RemnaWave пользователь {remnawave_uuid} отключен (fallback)")
+                            except Exception as fallback_e:
+                                logger.error(
+                                    f"❌ Не удалось отключить RemnaWave пользователя {remnawave_uuid} (fallback): {fallback_e}"
+                                )
+
             try:
                 sent_notifications_result = await db.execute(
                     select(SentNotification).where(SentNotification.user_id == user_id)
@@ -667,7 +736,7 @@ class UserService:
                 sent_notifications = sent_notifications_result.scalars().all()
                 
                 if sent_notifications:
-                    logger.info(f"🔄 Удаляем {len(sent_notifications)} уведомлений")
+                    logger.info(f"🧹 Удаляем уведомления: {len(sent_notifications)}")
                     await db.execute(
                         delete(SentNotification).where(SentNotification.user_id == user_id)
                     )
@@ -676,28 +745,32 @@ class UserService:
                 logger.error(f"❌ Ошибка удаления уведомлений: {e}")
     
             try:
-                if user.subscription:
-                    subscription_servers_result = await db.execute(
-                        select(SubscriptionServer).where(
-                            SubscriptionServer.subscription_id == user.subscription.id
-                        )
-                    )
-                    subscription_servers = subscription_servers_result.scalars().all()
-
-                    await decrement_subscription_server_counts(
-                        db,
-                        user.subscription,
-                        subscription_servers=subscription_servers,
-                    )
-
-                    if subscription_servers:
-                        logger.info(f"🔄 Удаляем {len(subscription_servers)} связей подписка-сервер")
-                        await db.execute(
-                            delete(SubscriptionServer).where(
-                                SubscriptionServer.subscription_id == user.subscription.id
+                if subscriptions:
+                    total_links = 0
+                    for subscription in subscriptions:
+                        subscription_servers_result = await db.execute(
+                            select(SubscriptionServer).where(
+                                SubscriptionServer.subscription_id == subscription.id
                             )
                         )
-                        await db.flush()
+                        subscription_servers = subscription_servers_result.scalars().all()
+
+                        await decrement_subscription_server_counts(
+                            db,
+                            subscription,
+                            subscription_servers=subscription_servers,
+                        )
+
+                        if subscription_servers:
+                            total_links += len(subscription_servers)
+                            await db.execute(
+                                delete(SubscriptionServer).where(
+                                    SubscriptionServer.subscription_id == subscription.id
+                                )
+                            )
+                            await db.flush()
+                    if total_links:
+                        logger.info(f"🧹 Удаляем связи подписка-сервер: {total_links}")
             except Exception as e:
                 logger.error(f"❌ Ошибка удаления связей подписка-сервер: {e}")
     
@@ -708,10 +781,10 @@ class UserService:
                     .values(created_by=None)
                 )
                 if user_messages_result.rowcount > 0:
-                    logger.info(f"🔄 Обновлено {user_messages_result.rowcount} пользовательских сообщений")
+                    logger.info(f"🧹 Удаляем сообщения пользователя: {user_messages_result.rowcount}")
                 await db.flush()
             except Exception as e:
-                logger.error(f"❌ Ошибка обновления пользовательских сообщений: {e}")
+                logger.error(f"❌ Ошибка удаления сообщений пользователя: {e}")
     
             try:
                 promocodes_result = await db.execute(
@@ -720,10 +793,10 @@ class UserService:
                     .values(created_by=None)
                 )
                 if promocodes_result.rowcount > 0:
-                    logger.info(f"🔄 Обновлено {promocodes_result.rowcount} промокодов")
+                    logger.info(f"🧹 Удаляем промокоды пользователя: {promocodes_result.rowcount}")
                 await db.flush()
             except Exception as e:
-                logger.error(f"❌ Ошибка обновления промокодов: {e}")
+                logger.error(f"❌ Ошибка удаления промокодов пользователя: {e}")
     
             try:
                 welcome_texts_result = await db.execute(
@@ -732,10 +805,10 @@ class UserService:
                     .values(created_by=None)
                 )
                 if welcome_texts_result.rowcount > 0:
-                    logger.info(f"🔄 Обновлено {welcome_texts_result.rowcount} приветственных текстов")
+                    logger.info(f"🧹 Удаляем приветственные тексты пользователя: {welcome_texts_result.rowcount}")
                 await db.flush()
             except Exception as e:
-                logger.error(f"❌ Ошибка обновления приветственных текстов: {e}")
+                logger.error(f"❌ Ошибка удаления приветственных текстов: {e}")
     
             try:
                 referrals_result = await db.execute(
@@ -744,10 +817,10 @@ class UserService:
                     .values(referred_by_id=None)
                 )
                 if referrals_result.rowcount > 0:
-                    logger.info(f"🔗 Очищены реферальные ссылки у {referrals_result.rowcount} рефералов")
+                    logger.info(f"🧹 Сбрасываем реферальные связи у пользователей: {referrals_result.rowcount}")
                 await db.flush()
             except Exception as e:
-                logger.error(f"❌ Ошибка очистки реферальных ссылок: {e}")
+                logger.error(f"❌ Ошибка очистки реферальных связей: {e}")
     
             try:
                 yookassa_result = await db.execute(
@@ -821,7 +894,7 @@ class UserService:
                 if mulenpay_payments:
                     mulenpay_name = settings.get_mulenpay_display_name()
                     logger.info(
-                        f"🔄 Удаляем {len(mulenpay_payments)} {mulenpay_name} платежей"
+                        f"ЁЯФД ╨г╨┤╨░╨╗╤П╨╡╨╝ {len(mulenpay_payments)} {mulenpay_name} ╨┐╨╗╨░╤В╨╡╨╢╨╡╨╣"
                     )
                     await db.execute(
                         update(MulenPayPayment)
@@ -835,7 +908,7 @@ class UserService:
                     await db.flush()
             except Exception as e:
                 logger.error(
-                    f"❌ Ошибка удаления {settings.get_mulenpay_display_name()} платежей: {e}"
+                    f"тЭМ ╨Ю╤И╨╕╨▒╨║╨░ ╤Г╨┤╨░╨╗╨╡╨╜╨╕╤П {settings.get_mulenpay_display_name()} ╨┐╨╗╨░╤В╨╡╨╢╨╡╨╣: {e}"
                 )
 
             try:
@@ -867,7 +940,7 @@ class UserService:
 
                 if heleket_payments:
                     logger.info(
-                        f"🔄 Удаляем {len(heleket_payments)} Heleket платежей"
+                        f"ЁЯФД ╨г╨┤╨░╨╗╤П╨╡╨╝ {len(heleket_payments)} Heleket ╨┐╨╗╨░╤В╨╡╨╢╨╡╨╣"
                     )
                     await db.execute(
                         update(HeleketPayment)
@@ -979,7 +1052,7 @@ class UserService:
                 campaigns = campaigns_result.scalars().all()
 
                 if campaigns:
-                    logger.info(f"🔄 Очищаем создателя у {len(campaigns)} рекламных кампаний")
+                    logger.info(f"🧹 Очищаем создателя у {len(campaigns)} рекламных кампаний")
                     await db.execute(
                         update(AdvertisingCampaign)
                         .where(AdvertisingCampaign.created_by == user_id)
@@ -990,14 +1063,14 @@ class UserService:
                 logger.error(f"❌ Ошибка обновления рекламных кампаний: {e}")
     
             try:
-                if user.subscription:
-                    logger.info(f"🔄 Удаляем подписку {user.subscription.id}")
+                if subscriptions:
+                    logger.info(f"🧹 Удаляем подписки пользователя {user_id}: {len(subscriptions)}")
                     await db.execute(
                         delete(Subscription).where(Subscription.user_id == user_id)
                     )
                     await db.flush()
             except Exception as e:
-                logger.error(f"❌ Ошибка удаления подписки: {e}")
+                logger.error(f"❌ Ошибка удаления подписок: {e}")
     
             try:
                 await db.execute(
@@ -1006,7 +1079,7 @@ class UserService:
                 await db.commit()
                 logger.info(f"✅ Пользователь {user_id} окончательно удален из базы")
             except Exception as e:
-                logger.error(f"❌ Ошибка финального удаления пользователя: {e}")
+                logger.error(f"❌ Ошибка обновления рекламных кампаний: {e}")
                 await db.rollback()
                 return False
             
@@ -1014,7 +1087,7 @@ class UserService:
             return True
             
         except Exception as e:
-            logger.error(f"❌ Критическая ошибка удаления пользователя {user_id}: {e}")
+            logger.error(f"❌ Ошибка обновления рекламных кампаний: {e}")
             await db.rollback()
             return False
     
@@ -1024,7 +1097,7 @@ class UserService:
             return stats
             
         except Exception as e:
-            logger.error(f"Ошибка получения статистики пользователей: {e}")
+            logger.error(f"╨Ю╤И╨╕╨▒╨║╨░ ╨┐╨╛╨╗╤Г╤З╨╡╨╜╨╕╤П ╤Б╤В╨░╤В╨╕╤Б╤В╨╕╨║╨╕ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╣: {e}")
             return {
                 "total_users": 0,
                 "active_users": 0,
@@ -1051,11 +1124,11 @@ class UserService:
                 if success:
                     deleted_count += 1
             
-            logger.info(f"Удалено {deleted_count} неактивных пользователей")
+            logger.info(f"╨г╨┤╨░╨╗╨╡╨╜╨╛ {deleted_count} ╨╜╨╡╨░╨║╤В╨╕╨▓╨╜╤Л╤Е ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╣")
             return deleted_count
             
         except Exception as e:
-            logger.error(f"Ошибка очистки неактивных пользователей: {e}")
+            logger.error(f"╨Ю╤И╨╕╨▒╨║╨░ ╨╛╤З╨╕╤Б╤В╨║╨╕ ╨╜╨╡╨░╨║╤В╨╕╨▓╨╜╤Л╤Е ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╣: {e}")
             return 0
     
     async def get_user_activity_summary(
@@ -1096,7 +1169,7 @@ class UserService:
             }
             
         except Exception as e:
-            logger.error(f"Ошибка получения сводки активности пользователя {user_id}: {e}")
+            logger.error(f"╨Ю╤И╨╕╨▒╨║╨░ ╨┐╨╛╨╗╤Г╤З╨╡╨╜╨╕╤П ╤Б╨▓╨╛╨┤╨║╨╕ ╨░╨║╤В╨╕╨▓╨╜╨╛╤Б╤В╨╕ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╤П {user_id}: {e}")
             return {}
     
     async def get_users_by_criteria(
@@ -1139,5 +1212,5 @@ class UserService:
             return filtered_users
             
         except Exception as e:
-            logger.error(f"Ошибка получения пользователей по критериям: {e}")
+            logger.error(f"╨Ю╤И╨╕╨▒╨║╨░ ╨┐╨╛╨╗╤Г╤З╨╡╨╜╨╕╤П ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╣ ╨┐╨╛ ╨║╤А╨╕╤В╨╡╤А╨╕╤П╨╝: {e}")
             return []

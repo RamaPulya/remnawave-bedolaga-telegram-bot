@@ -131,8 +131,14 @@ def _apply_remnawave_identity(
 
 def _resolve_hwid_limit(subscription: Subscription, tariff_code: str) -> Optional[int]:
     if tariff_code == TariffCode.WHITE.value:
-        return None
+        return 0
     return resolve_hwid_device_limit_for_payload(subscription)
+
+
+def _resolve_traffic_limit_strategy(tariff_code: str) -> TrafficLimitStrategy:
+    if tariff_code == TariffCode.WHITE.value:
+        return TrafficLimitStrategy.NO_RESET
+    return get_traffic_reset_strategy()
 
 
 def _pick_panel_user_by_username(
@@ -167,7 +173,15 @@ def _pick_panel_user_by_username(
                 return candidate
 
     if len(candidates) == 1:
-        return candidates[0]
+        candidate = candidates[0]
+        candidate_tag = (candidate.tag or "").strip().upper()
+        white_tag = _normalize_tag(settings.WHITE_TARIFF_TAG, "WHITE_TARIFF_TAG")
+        suffix = _get_white_suffix().lower()
+        if white_tag and candidate_tag == white_tag:
+            return None
+        if candidate.username and suffix and candidate.username.lower().endswith(suffix):
+            return None
+        return candidate
 
     return None
 
@@ -202,12 +216,12 @@ async def create_remnawave_user(
     try:
         user = await get_user_by_id(db, subscription.user_id)
         if not user:
-            logger.error("User %s not found", subscription.user_id)
+            logger.error("❌ Пользователь %s не найден", subscription.user_id)
             return None
 
         validation_success = await self.validate_and_clean_subscription(db, subscription, user)
         if not validation_success:
-            logger.error("Subscription validation failed for user %s", user.telegram_id)
+            logger.error("❌ Валидация подписки не прошла для пользователя %s", user.telegram_id)
             return None
 
         tariff_code = normalize_tariff_code(getattr(subscription, "tariff_code", None))
@@ -223,7 +237,7 @@ async def create_remnawave_user(
                 remnawave_user = await api.get_user_by_uuid(remnawave_uuid)
                 if not remnawave_user:
                     logger.warning(
-                        "RemnaWave user %s not found for subscription %s",
+                        "⚠️ RemnaWave пользователь %s не найден для подписки %s",
                         remnawave_uuid,
                         subscription.id,
                     )
@@ -245,7 +259,7 @@ async def create_remnawave_user(
                     status=UserStatus.ACTIVE,
                     expire_at=subscription.end_date,
                     traffic_limit_bytes=self._gb_to_bytes(subscription.traffic_limit_gb),
-                    traffic_limit_strategy=get_traffic_reset_strategy(),
+                    traffic_limit_strategy=_resolve_traffic_limit_strategy(tariff_code),
                     description=settings.format_remnawave_user_description(
                         full_name=user.full_name,
                         username=user.username,
@@ -276,7 +290,7 @@ async def create_remnawave_user(
                     expire_at=subscription.end_date,
                     status=UserStatus.ACTIVE,
                     traffic_limit_bytes=self._gb_to_bytes(subscription.traffic_limit_gb),
-                    traffic_limit_strategy=get_traffic_reset_strategy(),
+                    traffic_limit_strategy=_resolve_traffic_limit_strategy(tariff_code),
                     telegram_id=user.telegram_id,
                     description=settings.format_remnawave_user_description(
                         full_name=user.full_name,
@@ -306,7 +320,7 @@ async def create_remnawave_user(
             await db.commit()
 
             logger.info(
-                "RemnaWave user synced for subscription %s (tariff=%s, uuid=%s)",
+                "✅ RemnaWave пользователь синхронизирован для подписки %s (тариф=%s, uuid=%s)",
                 subscription.id,
                 tariff_code,
                 updated_user.uuid,
@@ -314,10 +328,10 @@ async def create_remnawave_user(
             return updated_user
 
     except RemnaWaveAPIError as error:
-        logger.error("RemnaWave API error: %s", error)
+        logger.error("❌ Ошибка RemnaWave API: %s", error)
         return None
     except Exception as error:
-        logger.error("RemnaWave user sync failed: %s", error)
+        logger.error("❌ Ошибка синхронизации RemnaWave пользователя: %s", error)
         return None
 
 
@@ -332,7 +346,7 @@ async def update_remnawave_user(
     try:
         user = await get_user_by_id(db, subscription.user_id)
         if not user:
-            logger.error("User %s not found", subscription.user_id)
+            logger.error("❌ Пользователь %s не найден", subscription.user_id)
             return None
 
         tariff_code = normalize_tariff_code(getattr(subscription, "tariff_code", None))
@@ -356,7 +370,7 @@ async def update_remnawave_user(
                         user.remnawave_uuid = remnawave_uuid
                 else:
                     logger.error(
-                        "RemnaWave UUID not found for subscription %s (tariff=%s)",
+                        "❌ RemnaWave UUID не найден для подписки %s (тариф=%s)",
                         subscription.id,
                         tariff_code,
                     )
@@ -377,7 +391,7 @@ async def update_remnawave_user(
                 await db.commit()
                 is_actually_active = False
                 logger.info(
-                    "Subscription %s auto-switched to expired",
+                    "🔄 Подписка %s автоматически переведена в истекшую",
                     subscription.id,
                 )
 
@@ -389,7 +403,7 @@ async def update_remnawave_user(
                 status=UserStatus.ACTIVE if is_actually_active else UserStatus.EXPIRED,
                 expire_at=subscription.end_date,
                 traffic_limit_bytes=self._gb_to_bytes(subscription.traffic_limit_gb),
-                traffic_limit_strategy=get_traffic_reset_strategy(),
+                traffic_limit_strategy=_resolve_traffic_limit_strategy(tariff_code),
                 description=settings.format_remnawave_user_description(
                     full_name=user.full_name,
                     username=user.username,
@@ -419,7 +433,7 @@ async def update_remnawave_user(
             await db.commit()
 
             logger.info(
-                "RemnaWave user updated for subscription %s (tariff=%s, uuid=%s)",
+                "✅ RemnaWave пользователь обновлен для подписки %s (тариф=%s, uuid=%s)",
                 subscription.id,
                 tariff_code,
                 remnawave_uuid,
@@ -427,10 +441,10 @@ async def update_remnawave_user(
             return updated_user
 
     except RemnaWaveAPIError as error:
-        logger.error("RemnaWave API error: %s", error)
+        logger.error("❌ Ошибка RemnaWave API: %s", error)
         return None
     except Exception as error:
-        logger.error("RemnaWave update failed: %s", error)
+        logger.error("❌ Ошибка синхронизации RemnaWave пользователя: %s", error)
         return None
 
 
@@ -456,14 +470,14 @@ async def revoke_subscription(
             await db.commit()
 
             logger.info(
-                "Subscription link updated for user %s (tariff=%s)",
+                "🔗 Ссылка подписки обновлена для пользователя %s (тариф=%s)",
                 user.telegram_id if user else subscription.user_id,
                 tariff_code,
             )
             return updated_user.subscription_url
 
     except Exception as error:
-        logger.error("Subscription link update failed: %s", error)
+        logger.error("❌ Ошибка обновления ссылки подписки: %s", error)
         return None
 
 
@@ -489,7 +503,7 @@ async def sync_subscription_usage(
             await db.commit()
 
             logger.debug(
-                "Usage synced for subscription %s (tariff=%s): %.2f GB",
+                "📊 Синхронизирован трафик для подписки %s (тариф=%s): %.2f ГБ",
                 subscription.id,
                 tariff_code,
                 used_gb,
@@ -497,7 +511,7 @@ async def sync_subscription_usage(
             return True
 
     except Exception as error:
-        logger.error("Usage sync failed: %s", error)
+        logger.error("❌ Ошибка синхронизации трафика: %s", error)
         return False
 
 
@@ -525,31 +539,31 @@ async def validate_and_clean_subscription(
                     remnawave_user = await api.get_user_by_uuid(remnawave_uuid)
                     if not remnawave_user:
                         logger.warning(
-                            "RemnaWave user %s not found for subscription %s",
+                            "⚠️ RemnaWave пользователь %s не найден для подписки %s",
                             remnawave_uuid,
                             subscription.id,
                         )
                         needs_cleanup = True
                     elif remnawave_user.telegram_id != user.telegram_id:
                         logger.warning(
-                            "Telegram ID mismatch for user %s (subscription %s)",
+                            "⚠️ Несовпадение Telegram ID: ожидается %s (подписка %s)",
                             user.telegram_id,
                             subscription.id,
                         )
                         needs_cleanup = True
             except Exception as api_error:
-                logger.error("RemnaWave validation failed: %s", api_error)
+                logger.error("❌ Ошибка проверки RemnaWave: %s", api_error)
                 needs_cleanup = True
 
         if subscription.remnawave_short_uuid and not remnawave_uuid:
             logger.warning(
-                "Subscription %s has short UUID without remnawave UUID",
+                "⚠️ У подписки %s есть short UUID без remnawave UUID",
                 subscription.id,
             )
             needs_cleanup = True
 
         if needs_cleanup:
-            logger.info("Cleaning subscription %s (tariff=%s)", subscription.id, tariff_code)
+            logger.info("🧹 Очищаем подписку %s (тариф=%s)", subscription.id, tariff_code)
             subscription.remnawave_uuid = None
             subscription.remnawave_short_uuid = None
             subscription.subscription_url = ""
@@ -560,7 +574,7 @@ async def validate_and_clean_subscription(
                 user.remnawave_uuid = None
 
             await db.commit()
-            logger.info("Subscription %s cleaned", subscription.id)
+            logger.info("✅ Подписка %s очищена", subscription.id)
             return True
 
         if updated_identity:
@@ -569,7 +583,7 @@ async def validate_and_clean_subscription(
         return True
 
     except Exception as error:
-        logger.error("Subscription validation failed: %s", error)
+        logger.error("❌ Ошибка валидации подписки: %s", error)
         await db.rollback()
         return False
 
@@ -641,7 +655,7 @@ async def _create_subscription_from_panel_data(
 
         await create_subscription_no_commit(db, **subscription_data)
         logger.info(
-            "Prepared subscription for user %s (tariff=%s, expire=%s)",
+            "🧾 Подготовлена подписка для пользователя %s (тариф=%s, срок=%s)",
             user.telegram_id,
             tariff_code,
             expire_at,
@@ -649,7 +663,7 @@ async def _create_subscription_from_panel_data(
 
     except Exception as error:
         logger.error(
-            "Failed to create subscription for user %s: %s",
+            "❌ Ошибка создания подписки для пользователя %s: %s",
             user.telegram_id,
             error,
         )
@@ -752,14 +766,14 @@ async def _update_subscription_from_panel_data(
             subscription.connected_squads = squad_uuids
 
         logger.debug(
-            "Updated subscription for user %s (tariff=%s)",
+            "🔄 Подписка обновлена для пользователя %s (тариф=%s)",
             user.telegram_id,
             tariff_code,
         )
 
     except Exception as error:
         logger.error(
-            "Failed to update subscription for user %s: %s",
+            "❌ Ошибка обновления подписки для пользователя %s: %s",
             user.telegram_id,
             error,
         )
@@ -770,7 +784,7 @@ async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = "all") 
     try:
         stats = {"created": 0, "updated": 0, "errors": 0, "deleted": 0}
 
-        logger.info("RemnaWave sync from panel: %s", sync_type)
+        logger.info("🔄 Синхронизация RemnaWave из панели: %s", sync_type)
 
         async with self.get_api_client() as api:
             panel_users: List[Dict[str, Any]] = []
@@ -887,7 +901,7 @@ async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = "all") 
                         stats["updated"] += 1
 
             except Exception as user_error:
-                logger.error("Panel user processing failed: %s", user_error)
+                logger.error("❌ Ошибка обработки пользователя панели: %s", user_error)
                 stats["errors"] += 1
                 if uuid_mutation:
                     uuid_mutation.rollback()
@@ -910,7 +924,7 @@ async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = "all") 
                     await db.commit()
                     pending_uuid_mutations.clear()
                 except Exception as commit_error:
-                    logger.error("Sync commit failed: %s", commit_error)
+                    logger.error("❌ Ошибка коммита синхронизации: %s", commit_error)
                     await db.rollback()
                     for mutation in reversed(pending_uuid_mutations):
                         mutation.rollback()
@@ -921,7 +935,7 @@ async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = "all") 
             await db.commit()
             pending_uuid_mutations.clear()
         except Exception as final_commit_error:
-            logger.error("Final sync commit failed: %s", final_commit_error)
+            logger.error("❌ Ошибка финального коммита синхронизации: %s", final_commit_error)
             await db.rollback()
             for mutation in reversed(pending_uuid_mutations):
                 mutation.rollback()
@@ -987,12 +1001,12 @@ async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = "all") 
                     offset += limit
 
             except Exception as cleanup_error:
-                logger.error("Cleanup after sync failed: %s", cleanup_error)
+                logger.error("❌ Ошибка очистки после синхронизации: %s", cleanup_error)
 
         return stats
 
     except Exception as error:
-        logger.error("RemnaWave sync failed: %s", error)
+        logger.error("❌ Ошибка синхронизации RemnaWave: %s", error)
         return {"created": 0, "updated": 0, "errors": 1, "deleted": 0}
 
 
@@ -1053,7 +1067,7 @@ async def sync_users_to_panel(self, db: AsyncSession) -> Dict[str, int]:
                                 traffic_limit_bytes=sub.traffic_limit_gb * (1024**3)
                                 if sub.traffic_limit_gb > 0
                                 else 0,
-                                traffic_limit_strategy=TrafficLimitStrategy.MONTH,
+                                traffic_limit_strategy=_resolve_traffic_limit_strategy(tariff_code),
                                 telegram_id=user.telegram_id,
                                 description=settings.format_remnawave_user_description(
                                     full_name=user.full_name,
@@ -1093,7 +1107,7 @@ async def sync_users_to_panel(self, db: AsyncSession) -> Dict[str, int]:
                                     status=status,
                                     expire_at=expire_at,
                                     traffic_limit_bytes=create_kwargs["traffic_limit_bytes"],
-                                    traffic_limit_strategy=TrafficLimitStrategy.MONTH,
+                                    traffic_limit_strategy=_resolve_traffic_limit_strategy(tariff_code),
                                     description=create_kwargs["description"],
                                     active_internal_squads=sub.connected_squads,
                                 )
@@ -1120,7 +1134,7 @@ async def sync_users_to_panel(self, db: AsyncSession) -> Dict[str, int]:
 
                         except Exception as error:
                             logger.error(
-                                "Panel sync failed for user %s: %s",
+                                "❌ Синхронизация с панелью не удалась для пользователя %s: %s",
                                 sub.user.telegram_id if sub.user else "N/A",
                                 error,
                             )
@@ -1152,7 +1166,7 @@ async def sync_users_to_panel(self, db: AsyncSession) -> Dict[str, int]:
                 try:
                     await db.commit()
                 except Exception as commit_error:
-                    logger.error("Panel sync commit failed: %s", commit_error)
+                    logger.error("❌ Ошибка коммита синхронизации панели: %s", commit_error)
                     await db.rollback()
                     stats["errors"] += len(valid_subscriptions)
 
@@ -1164,7 +1178,7 @@ async def sync_users_to_panel(self, db: AsyncSession) -> Dict[str, int]:
         return stats
 
     except Exception as error:
-        logger.error("RemnaWave sync to panel failed: %s", error)
+        logger.error("❌ Ошибка синхронизации RemnaWave в панель: %s", error)
         return {"created": 0, "updated": 0, "errors": 1}
 
 

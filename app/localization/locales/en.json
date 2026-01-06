@@ -1656,5 +1656,6 @@
   "ADMIN_USER_RESTRICTIONS": "⚠️ Restrict",
   "USER_RESTRICTION_TOPUP_BLOCKED": "🚫 <b>Top-up restricted</b>\n\n{reason}\n\nIf you believe this is an error, you can appeal the decision.",
   "USER_RESTRICTION_SUBSCRIPTION_BLOCKED": "🚫 <b>Subscription purchase/renewal restricted</b>\n\n{reason}\n\nIf you believe this is an error, you can appeal the decision.",
-  "USER_RESTRICTION_APPEAL_BUTTON": "🆘 Appeal"
+  "USER_RESTRICTION_APPEAL_BUTTON": "🆘 Appeal",
+  "SUBSCRIPTION_TARIFF_SELECT_PROMPT": "💎 <b>Subscription setup</b>\n\nLet’s tailor your subscription to your needs.\n\nFirst, choose the subscription type:"
 }
