@@ -41,5 +41,6 @@ class PrizeType(str, Enum):
     """Types of prizes for contests."""
 
     DAYS = "days"
+    TRAFFIC_GB = "traffic_gb"
     BALANCE = "balance"
     CUSTOM = "custom"

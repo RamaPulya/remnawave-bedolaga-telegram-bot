@@ -23,6 +23,154 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _is_connectish_button_text(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.strip().lower()
+    return ("подключ" in lowered) or ("connect" in lowered)
+
+
+def _is_connectish_button(button: InlineKeyboardButton) -> bool:
+    if not button:
+        return False
+
+    text = getattr(button, "text", "") or ""
+    if _is_connectish_button_text(text):
+        return True
+
+    callback_data = getattr(button, "callback_data", "") or ""
+    if callback_data in {
+        "subscription_connect",
+        "open_subscription_link",
+        "open_subscription_link_white",
+    }:
+        return True
+
+    return False
+
+
+def _sort_connect_buttons(buttons: list[InlineKeyboardButton]) -> list[InlineKeyboardButton]:
+    def _priority(btn: InlineKeyboardButton) -> int:
+        text = (getattr(btn, "text", "") or "").lower()
+        callback_data = (getattr(btn, "callback_data", "") or "").lower()
+        if "white" in callback_data or "⚪" in text:
+            return 1
+        return 0
+
+    return sorted(buttons, key=_priority)
+
+
+def _extract_connect_buttons_from_rows(
+    rows: list[list[InlineKeyboardButton]],
+) -> tuple[list[InlineKeyboardButton], list[list[InlineKeyboardButton]]]:
+    connect_buttons: list[InlineKeyboardButton] = []
+    rebuilt_rows: list[list[InlineKeyboardButton]] = []
+
+    for row in rows:
+        remaining: list[InlineKeyboardButton] = []
+        for btn in row:
+            if _is_connectish_button(btn):
+                connect_buttons.append(btn)
+            else:
+                remaining.append(btn)
+
+        if remaining:
+            rebuilt_rows.append(remaining)
+
+    return connect_buttons, rebuilt_rows
+
+
+def _is_subscription_connect_visible(subscription) -> bool:
+    if not subscription:
+        return False
+    actual_status = (getattr(subscription, "actual_status", "") or "").lower()
+    return actual_status in {"active", "trial"}
+
+
+def _build_connect_button_by_mode(
+    *,
+    button_text: str,
+    subscription_link: Optional[str],
+    fallback_callback: str,
+    happ_callback: str,
+) -> InlineKeyboardButton:
+    connect_mode = settings.CONNECT_BUTTON_MODE
+
+    if connect_mode == "miniapp_subscription":
+        if subscription_link:
+            return InlineKeyboardButton(
+                text=button_text,
+                web_app=types.WebAppInfo(url=subscription_link),
+            )
+        return InlineKeyboardButton(text=button_text, callback_data=fallback_callback)
+
+    if connect_mode == "miniapp_custom":
+        if settings.MINIAPP_CUSTOM_URL:
+            return InlineKeyboardButton(
+                text=button_text,
+                web_app=types.WebAppInfo(url=settings.MINIAPP_CUSTOM_URL),
+            )
+        return InlineKeyboardButton(text=button_text, callback_data=fallback_callback)
+
+    if connect_mode == "link":
+        if subscription_link:
+            return InlineKeyboardButton(text=button_text, url=subscription_link)
+        return InlineKeyboardButton(text=button_text, callback_data=fallback_callback)
+
+    if connect_mode == "happ_cryptolink":
+        if subscription_link:
+            return InlineKeyboardButton(text=button_text, callback_data=happ_callback)
+        return InlineKeyboardButton(text=button_text, callback_data=fallback_callback)
+
+    return InlineKeyboardButton(text=button_text, callback_data=fallback_callback)
+
+
+def _build_main_menu_connect_row(
+    *,
+    language: str,
+    standard_subscription,
+    white_subscription,
+) -> Optional[list[InlineKeyboardButton]]:
+    standard_active = _is_subscription_connect_visible(standard_subscription)
+    white_active = _is_subscription_connect_visible(white_subscription)
+
+    if not (standard_active or white_active):
+        return None
+
+    if (language or "").split("-")[0].lower() == "ru":
+        standard_text = "🔗 Подключиться 🕷"
+        white_text = "🔗 Подключиться ⚪️"
+    else:
+        standard_text = "🔗 Connect 🕷"
+        white_text = "🔗 Connect ⚪️"
+
+    buttons: list[InlineKeyboardButton] = []
+
+    if standard_active:
+        standard_link = get_display_subscription_link(standard_subscription)
+        buttons.append(
+            _build_connect_button_by_mode(
+                button_text=standard_text,
+                subscription_link=standard_link,
+                fallback_callback="subscription_connect",
+                happ_callback="open_subscription_link",
+            )
+        )
+
+    if white_active:
+        white_link = get_display_subscription_link(white_subscription)
+        buttons.append(
+            _build_connect_button_by_mode(
+                button_text=white_text,
+                subscription_link=white_link,
+                fallback_callback="subscription_connect",
+                happ_callback="open_subscription_link_white",
+            )
+        )
+
+    return buttons or None
+
+
 async def get_main_menu_keyboard_async(
     db: AsyncSession,
     language: str = DEFAULT_LANGUAGE,
@@ -135,7 +283,38 @@ async def get_main_menu_keyboard_async(
             has_autopay=has_autopay,
         )
 
-        return await MenuLayoutService.build_keyboard(db, context)
+        keyboard = await MenuLayoutService.build_keyboard(db, context)
+
+        if settings.SPIDERMAN_MODE:
+            connect_row_from_subscriptions = _build_main_menu_connect_row(
+                language=language,
+                standard_subscription=subscription,
+                white_subscription=(
+                    getattr(user, "__dict__", {}).get("subscription_white")
+                    if (user and settings.MULTI_TARIFF_ENABLED)
+                    else None
+                ),
+            ) or []
+
+            extracted_connect_buttons, rebuilt_rows = _extract_connect_buttons_from_rows(
+                keyboard.inline_keyboard
+            )
+            extracted_connect_buttons = _sort_connect_buttons(extracted_connect_buttons)
+
+            connect_buttons = (
+                connect_row_from_subscriptions
+                if connect_row_from_subscriptions
+                else extracted_connect_buttons
+            )
+
+            if connect_buttons:
+                return InlineKeyboardMarkup(
+                    inline_keyboard=[connect_buttons[:2], *rebuilt_rows]
+                )
+
+            return InlineKeyboardMarkup(inline_keyboard=rebuilt_rows)
+
+        return keyboard
 
     # Fallback на синхронную версию
     return get_main_menu_keyboard(
@@ -150,6 +329,7 @@ async def get_main_menu_keyboard_async(
         has_saved_cart=has_saved_cart,
         is_moderator=is_moderator,
         custom_buttons=custom_buttons,
+        user=user,
     )
 
 
@@ -424,6 +604,7 @@ def get_main_menu_keyboard(
     *,
     is_moderator: bool = False,
     custom_buttons: Optional[list[InlineKeyboardButton]] = None,
+    user: Optional[User] = None,
 ) -> InlineKeyboardMarkup:
     texts = get_texts(language)
 
@@ -450,55 +631,26 @@ def get_main_menu_keyboard(
     keyboard: list[list[InlineKeyboardButton]] = []
     paired_buttons: list[InlineKeyboardButton] = []
 
-    if has_active_subscription and subscription_is_active:
-        connect_mode = settings.CONNECT_BUTTON_MODE
-        subscription_link = get_display_subscription_link(subscription)
+    standard_subscription = subscription
+    white_subscription = getattr(user, "__dict__", {}).get("subscription_white") if user else None
 
-        def _fallback_connect_button() -> InlineKeyboardButton:
-            return InlineKeyboardButton(
-                text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
-                callback_data="subscription_connect",
-            )
+    standard_active = bool(getattr(standard_subscription, "is_active", False))
+    white_active = bool(getattr(white_subscription, "is_active", False))
 
-        if connect_mode == "miniapp_subscription":
-            if subscription_link:
-                keyboard.append([
-                    InlineKeyboardButton(
-                        text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
-                        web_app=types.WebAppInfo(url=subscription_link)
-                    )
-                ])
-            else:
-                keyboard.append([_fallback_connect_button()])
-        elif connect_mode == "miniapp_custom":
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
-                    web_app=types.WebAppInfo(url=settings.MINIAPP_CUSTOM_URL)
-                )
-            ])
-        elif connect_mode == "link":
-            if subscription_link:
-                keyboard.append([
-                    InlineKeyboardButton(
-                        text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
-                        url=subscription_link
-                    )
-                ])
-            else:
-                keyboard.append([_fallback_connect_button()])
-        elif connect_mode == "happ_cryptolink":
-            if subscription_link:
-                keyboard.append([
-                    InlineKeyboardButton(
-                        text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
-                        callback_data="open_subscription_link",
-                    )
-                ])
-            else:
-                keyboard.append([_fallback_connect_button()])
-        else:
-            keyboard.append([_fallback_connect_button()])
+    has_any_active_subscription = (
+        (standard_active or white_active)
+        if (settings.MULTI_TARIFF_ENABLED and user is not None)
+        else (has_active_subscription and subscription_is_active)
+    )
+
+    if has_any_active_subscription:
+        connect_row = _build_main_menu_connect_row(
+            language=language,
+            standard_subscription=standard_subscription,
+            white_subscription=white_subscription if settings.MULTI_TARIFF_ENABLED else None,
+        )
+        if connect_row:
+            keyboard.append(connect_row)
 
         happ_row = get_happ_download_button_row(texts)
         if happ_row:
@@ -521,11 +673,22 @@ def get_main_menu_keyboard(
             )
 
     keyboard.append([InlineKeyboardButton(text=balance_button_text, callback_data="menu_balance")])
-    
-    show_trial = not has_had_paid_subscription and not has_active_subscription
 
-    show_buy = not has_active_subscription or not subscription_is_active
+    effective_has_active_subscription = has_active_subscription
+    effective_subscription_is_active = subscription_is_active
     current_subscription = subscription
+
+    if settings.MULTI_TARIFF_ENABLED and user is not None:
+        effective_has_active_subscription = has_any_active_subscription
+        effective_subscription_is_active = has_any_active_subscription
+        if standard_active:
+            current_subscription = standard_subscription
+        elif white_active:
+            current_subscription = white_subscription
+
+    show_trial = not has_had_paid_subscription and not effective_has_active_subscription
+
+    show_buy = not effective_has_active_subscription or not effective_subscription_is_active
     has_active_paid_subscription = bool(
         current_subscription
         and not getattr(current_subscription, "is_trial", False)
@@ -620,6 +783,27 @@ def get_main_menu_keyboard(
     for i in range(0, len(paired_buttons), 2):
         row = paired_buttons[i : i + 2]
         keyboard.append(row)
+
+    if settings.SPIDERMAN_MODE:
+        connect_row_from_subscriptions = _build_main_menu_connect_row(
+            language=language,
+            standard_subscription=standard_subscription,
+            white_subscription=white_subscription if settings.MULTI_TARIFF_ENABLED else None,
+        ) or []
+
+        extracted_connect_buttons, rebuilt_rows = _extract_connect_buttons_from_rows(keyboard)
+        extracted_connect_buttons = _sort_connect_buttons(extracted_connect_buttons)
+
+        connect_buttons = (
+            connect_row_from_subscriptions
+            if connect_row_from_subscriptions
+            else extracted_connect_buttons
+        )
+
+        if connect_buttons:
+            keyboard = [connect_buttons[:2], *rebuilt_rows]
+        else:
+            keyboard = rebuilt_rows
 
     if settings.DEBUG:
         print(f"DEBUG KEYBOARD: is_admin={is_admin}, добавляем админ кнопку: {is_admin}")

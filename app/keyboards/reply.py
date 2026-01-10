@@ -5,6 +5,17 @@ from app.localization.texts import get_texts
 from app.config import settings
 
 
+def get_reply_main_menu_keyboard(language: str = "ru") -> ReplyKeyboardMarkup:
+    texts = get_texts(language)
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=texts.t("REPLY_MAIN_MENU_BUTTON", "🕷 Главное меню"))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
 def get_main_reply_keyboard(language: str = "ru") -> ReplyKeyboardMarkup:
     texts = get_texts(language)
     

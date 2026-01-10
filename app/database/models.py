@@ -19,6 +19,7 @@ from sqlalchemy import (
     Index,
     Table,
     SmallInteger,
+    and_,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, Mapped, mapped_column
@@ -88,6 +89,7 @@ class PaymentMethod(Enum):
     PLATEGA = "platega"
     CLOUDPAYMENTS = "cloudpayments"
     FREEKASSA = "freekassa"
+    BALANCE = "balance"
     MANUAL = "manual"
 
 
@@ -746,7 +748,18 @@ class User(Base):
     cabinet_last_login = Column(DateTime, nullable=True)
     broadcasts = relationship("BroadcastHistory", back_populates="admin")
     referrals = relationship("User", backref="referrer", remote_side=[id], foreign_keys="User.referred_by_id")
-    subscription = relationship("Subscription", back_populates="user", uselist=False)
+    subscription = relationship(
+        "Subscription",
+        primaryjoin=lambda: and_(User.id == Subscription.user_id, Subscription.tariff_code == "standard"),
+        uselist=False,
+        overlaps="subscription_white,user",
+    )
+    subscription_white = relationship(
+        "Subscription",
+        primaryjoin=lambda: and_(User.id == Subscription.user_id, Subscription.tariff_code == "white"),
+        uselist=False,
+        overlaps="subscription,user",
+    )
     transactions = relationship("Transaction", back_populates="user")
     referral_earnings = relationship("ReferralEarning", foreign_keys="ReferralEarning.user_id", back_populates="user")
     discount_offers = relationship("DiscountOffer", back_populates="user")
@@ -876,7 +889,7 @@ class Subscription(Base):
     remnawave_uuid = Column(String(255), nullable=True)
     remnawave_short_uuid = Column(String(255), nullable=True)
 
-    user = relationship("User", back_populates="subscription")
+    user = relationship("User")
     discount_offers = relationship("DiscountOffer", back_populates="subscription")
     temporary_accesses = relationship("SubscriptionTemporaryAccess", back_populates="subscription")
     

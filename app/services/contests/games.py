@@ -67,6 +67,43 @@ class BaseGameStrategy(ABC):
         from app.localization.texts import get_texts
         return get_texts(language)
 
+    @staticmethod
+    def _normalize_text_answer(user_answer: str, correct: str) -> str:
+        """
+        Normalize user answer for text games.
+
+        If correct answer is ASCII (A-Z/0-9), additionally map Cyrillic look-alike letters to Latin.
+        This helps when users accidentally type with a Russian keyboard layout.
+        """
+        normalized = (user_answer or "").strip().upper()
+        correct_norm = (correct or "").strip().upper()
+        if not correct_norm:
+            return normalized
+
+        is_ascii_correct = all(
+            ("A" <= ch <= "Z") or ch.isdigit() or ch in {"_", "-", " "} for ch in correct_norm
+        )
+        if not is_ascii_correct:
+            return normalized
+
+        cyr_to_lat = str.maketrans(
+            {
+                "А": "A",
+                "В": "B",
+                "С": "C",
+                "Е": "E",
+                "Н": "H",
+                "К": "K",
+                "М": "M",
+                "О": "O",
+                "Р": "P",
+                "Т": "T",
+                "Х": "X",
+                "У": "Y",
+            }
+        )
+        return normalized.translate(cyr_to_lat)
+
 
 class QuestButtonsStrategy(BaseGameStrategy):
     """3x3 grid game - find the secret button."""
@@ -344,7 +381,7 @@ class LetterCipherStrategy(BaseGameStrategy):
         language: str,
     ) -> AnswerCheckResult:
         correct = (payload.get("answer") or "").upper()
-        is_correct = correct and user_answer.strip().upper() == correct
+        is_correct = correct and self._normalize_text_answer(user_answer, correct) == correct
 
         return AnswerCheckResult(
             is_correct=is_correct,
@@ -391,7 +428,7 @@ class EmojiGuessStrategy(BaseGameStrategy):
         language: str,
     ) -> AnswerCheckResult:
         correct = (payload.get("answer") or "").upper()
-        is_correct = correct and user_answer.strip().upper() == correct
+        is_correct = correct and self._normalize_text_answer(user_answer, correct) == correct
 
         return AnswerCheckResult(
             is_correct=is_correct,
@@ -438,7 +475,7 @@ class AnagramStrategy(BaseGameStrategy):
         language: str,
     ) -> AnswerCheckResult:
         correct = (payload.get("answer") or "").upper()
-        is_correct = correct and user_answer.strip().upper() == correct
+        is_correct = correct and self._normalize_text_answer(user_answer, correct) == correct
 
         return AnswerCheckResult(
             is_correct=is_correct,

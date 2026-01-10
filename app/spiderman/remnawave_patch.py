@@ -59,6 +59,74 @@ def _get_white_suffix() -> str:
     return sanitized
 
 
+def _get_standard_tag() -> str:
+    tag = _normalize_tag(settings.STANDARD_TARIFF_TAG, "STANDARD_TARIFF_TAG")
+    return tag or "STANDARD"
+
+
+def _get_white_tag() -> str:
+    tag = _normalize_tag(settings.WHITE_TARIFF_TAG, "WHITE_TARIFF_TAG")
+    return tag or "WHITE"
+
+
+def _get_trial_tag() -> str:
+    tag = settings.get_trial_user_tag()
+    return tag or "TRIAL"
+
+
+def _normalize_panel_tag(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = str(value).strip().upper()
+    return cleaned or None
+
+
+def _matches_panel_username(telegram_id: int, username: Optional[str], *, is_white: bool) -> bool:
+    if not telegram_id or not username:
+        return False
+
+    expected = f"tg_{telegram_id}"
+    if is_white:
+        expected = f"{expected}{_get_white_suffix()}"
+
+    cleaned_username = str(username).strip().lstrip("@")
+    return cleaned_username.lower() == expected.lower()
+
+
+def _resolve_panel_identity(panel_user: Dict[str, Any]) -> Optional[tuple[str, bool]]:
+    telegram_id = panel_user.get("telegramId")
+    if not telegram_id:
+        return None
+
+    panel_tag = _normalize_panel_tag(panel_user.get("tag"))
+    username = panel_user.get("username")
+
+    standard_tag = _get_standard_tag()
+    white_tag = _get_white_tag()
+    trial_tag = _get_trial_tag()
+
+    if panel_tag:
+        if panel_tag == standard_tag:
+            return TariffCode.STANDARD.value, False
+        if panel_tag == white_tag:
+            return TariffCode.WHITE.value, False
+        if panel_tag == trial_tag:
+            tariff_code = (
+                TariffCode.WHITE.value
+                if _matches_panel_username(telegram_id, username, is_white=True)
+                else TariffCode.STANDARD.value
+            )
+            return tariff_code, True
+        return None
+
+    if _matches_panel_username(telegram_id, username, is_white=False):
+        return TariffCode.STANDARD.value, False
+    if _matches_panel_username(telegram_id, username, is_white=True):
+        return TariffCode.WHITE.value, False
+
+    return None
+
+
 def _build_remnawave_username(user: User, tariff_code: str) -> str:
     base_username = settings.format_remnawave_username(
         full_name=user.full_name,
@@ -190,11 +258,18 @@ def _detect_tariff_from_panel_user(panel_user: Dict[str, Any]) -> str:
     tag = panel_user.get("tag")
     if tag:
         tag_value = str(tag).strip().upper()
-        white_tag = _normalize_tag(settings.WHITE_TARIFF_TAG, "WHITE_TARIFF_TAG")
-        standard_tag = _normalize_tag(settings.STANDARD_TARIFF_TAG, "STANDARD_TARIFF_TAG")
+        white_tag = _get_white_tag()
+        standard_tag = _get_standard_tag()
+        trial_tag = _get_trial_tag()
         if white_tag and tag_value == white_tag:
             return TariffCode.WHITE.value
         if standard_tag and tag_value == standard_tag:
+            return TariffCode.STANDARD.value
+        if trial_tag and tag_value == trial_tag:
+            username = (panel_user.get("username") or "").lower()
+            suffix = _get_white_suffix().lower()
+            if suffix and username.endswith(suffix):
+                return TariffCode.WHITE.value
             return TariffCode.STANDARD.value
 
     username = (panel_user.get("username") or "").lower()
@@ -595,6 +670,7 @@ async def _create_subscription_from_panel_data(
     panel_user: Dict[str, Any],
     *,
     tariff_code: Optional[str] = None,
+    is_trial: Optional[bool] = None,
 ) -> None:
     try:
         from app.database.crud.subscription import create_subscription_no_commit
@@ -608,7 +684,15 @@ async def _create_subscription_from_panel_data(
         panel_status = panel_user.get("status", "ACTIVE")
         current_time = self._now_utc()
 
-        if panel_status == "ACTIVE" and expire_at > current_time:
+        is_trial_flag = bool(is_trial)
+        if is_trial_flag:
+            if expire_at <= current_time:
+                status = SubscriptionStatus.EXPIRED
+            elif panel_status == "DISABLED":
+                status = SubscriptionStatus.DISABLED
+            else:
+                status = SubscriptionStatus.TRIAL
+        elif panel_status == "ACTIVE" and expire_at > current_time:
             status = SubscriptionStatus.ACTIVE
         elif expire_at <= current_time:
             status = SubscriptionStatus.EXPIRED
@@ -638,7 +722,7 @@ async def _create_subscription_from_panel_data(
             "user_id": user.id,
             "tariff_code": tariff_code,
             "status": status.value,
-            "is_trial": False,
+            "is_trial": is_trial_flag,
             "end_date": expire_at,
             "traffic_limit_gb": traffic_limit_gb,
             "traffic_used_gb": traffic_used_gb,
@@ -652,6 +736,14 @@ async def _create_subscription_from_panel_data(
                 or (panel_user.get("happ") or {}).get("cryptoLink", "")
             ),
         }
+
+        if (
+            tariff_code == TariffCode.STANDARD.value
+            and not getattr(user, "remnawave_uuid", None)
+        ):
+            panel_uuid = panel_user.get("uuid")
+            if panel_uuid:
+                user.remnawave_uuid = panel_uuid
 
         await create_subscription_no_commit(db, **subscription_data)
         logger.info(
@@ -676,6 +768,7 @@ async def _update_subscription_from_panel_data(
     panel_user: Dict[str, Any],
     *,
     tariff_code: Optional[str] = None,
+    is_trial: Optional[bool] = None,
 ) -> None:
     try:
         from app.database.crud.subscription import get_subscription_by_user_id
@@ -706,7 +799,18 @@ async def _update_subscription_from_panel_data(
                 subscription.end_date = expire_at
 
         current_time = self._now_utc()
-        if panel_status == "ACTIVE" and subscription.end_date > current_time:
+        is_trial_flag = bool(is_trial)
+        if subscription.is_trial != is_trial_flag:
+            subscription.is_trial = is_trial_flag
+
+        if is_trial_flag:
+            if subscription.end_date <= current_time:
+                new_status = SubscriptionStatus.EXPIRED.value
+            elif panel_status == "DISABLED":
+                new_status = SubscriptionStatus.DISABLED.value
+            else:
+                new_status = SubscriptionStatus.TRIAL.value
+        elif panel_status == "ACTIVE" and subscription.end_date > current_time:
             new_status = SubscriptionStatus.ACTIVE.value
         elif subscription.end_date <= current_time:
             new_status = SubscriptionStatus.EXPIRED.value
@@ -737,6 +841,13 @@ async def _update_subscription_from_panel_data(
         panel_uuid = panel_user.get("uuid")
         if panel_uuid and subscription.remnawave_uuid != panel_uuid:
             subscription.remnawave_uuid = panel_uuid
+
+        if (
+            tariff_code == TariffCode.STANDARD.value
+            and panel_uuid
+            and not getattr(user, "remnawave_uuid", None)
+        ):
+            user.remnawave_uuid = panel_uuid
 
         new_short_uuid = panel_user.get("shortUuid")
         if new_short_uuid and subscription.remnawave_short_uuid != new_short_uuid:
@@ -792,7 +903,7 @@ async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = "all") 
             size = 500
 
             while True:
-                response = await api.get_all_users(start=start, size=size, enrich_happ_links=False)
+                response = await api.get_all_users(start=start, size=size, enrich_happ_links=True)
                 users_batch = response["users"]
 
                 for user_obj in users_batch:
@@ -821,10 +932,32 @@ async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = "all") 
         panel_users_with_tg = [
             user for user in panel_users if user.get("telegramId") is not None
         ]
-        panel_keys = {
-            (user.get("telegramId"), _detect_tariff_from_panel_user(user))
-            for user in panel_users_with_tg
+        panel_uuid_set = {
+            user.get("uuid") for user in panel_users_with_tg if user.get("uuid")
         }
+
+        panel_candidates: List[Dict[str, Any]] = []
+        for panel_user in panel_users_with_tg:
+            identity = _resolve_panel_identity(panel_user)
+            if not identity:
+                continue
+            tariff_code, is_trial = identity
+            panel_user["_spiderman_tariff_code"] = tariff_code
+            panel_user["_spiderman_is_trial"] = is_trial
+            panel_candidates.append(panel_user)
+
+        unique_panel_users: Dict[tuple[Any, str], Dict[str, Any]] = {}
+        for panel_user in panel_candidates:
+            key = (panel_user.get("telegramId"), panel_user.get("_spiderman_tariff_code"))
+            existing_user = unique_panel_users.get(key)
+            if existing_user is None or self._is_preferred_panel_user(
+                candidate=panel_user,
+                current=existing_user,
+            ):
+                unique_panel_users[key] = panel_user
+
+        panel_keys = set(unique_panel_users.keys())
+        panel_users_for_sync = list(unique_panel_users.values())
 
         bot_users_result = await db.execute(select(User))
         bot_users = bot_users_result.scalars().all()
@@ -838,14 +971,15 @@ async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = "all") 
         batch_size = 50
         pending_uuid_mutations: List[Any] = []
 
-        for i, panel_user in enumerate(panel_users_with_tg):
+        for i, panel_user in enumerate(panel_users_for_sync):
             uuid_mutation = None
             try:
                 telegram_id = panel_user.get("telegramId")
                 if not telegram_id:
                     continue
 
-                tariff_code = _detect_tariff_from_panel_user(panel_user)
+                tariff_code = panel_user.get("_spiderman_tariff_code") or _detect_tariff_from_panel_user(panel_user)
+                is_trial = bool(panel_user.get("_spiderman_is_trial"))
                 db_user = bot_users_by_telegram_id.get(telegram_id)
 
                 if not db_user:
@@ -870,6 +1004,7 @@ async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = "all") 
                                 db_user,
                                 panel_user,
                                 tariff_code=tariff_code,
+                                is_trial=is_trial,
                             )
                             stats["created"] += 1
                         else:
@@ -879,6 +1014,7 @@ async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = "all") 
                                 db_user,
                                 panel_user,
                                 tariff_code=tariff_code,
+                                is_trial=is_trial,
                             )
                             stats["updated"] += 1
                 else:
@@ -889,6 +1025,7 @@ async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = "all") 
                             db_user,
                             panel_user,
                             tariff_code=tariff_code,
+                            is_trial=is_trial,
                         )
 
                         if tariff_code == TariffCode.STANDARD.value:
@@ -948,7 +1085,6 @@ async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = "all") 
                 offset = 0
                 limit = 500
                 current_time = datetime.utcnow()
-                panel_uuid_set = {user.get("uuid") for user in panel_users_with_tg if user.get("uuid")}
 
                 while True:
                     subscriptions = await get_subscriptions_batch(db, offset=offset, limit=limit)

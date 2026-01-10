@@ -29,8 +29,10 @@ from app.utils.decorators import admin_required, error_handler
 logger = logging.getLogger(__name__)
 
 EDITABLE_FIELDS: Dict[str, Dict] = {
-    "prize_type": {"type": str, "label": "тип приза (days/balance/custom)"},
+    "prize_type": {"type": str, "label": "тип приза (days/traffic_gb/balance/custom)"},
     "prize_value": {"type": str, "label": "значение приза"},
+    # Backward compatibility: old admin keyboard used "prize_days"
+    "prize_days": {"type": int, "min": 1, "label": "приз (дни)"},
     "max_winners": {"type": int, "min": 1, "label": "макс. победителей"},
     "attempts_per_user": {"type": int, "min": 1, "label": "попыток на пользователя"},
     "times_per_day": {"type": int, "min": 1, "label": "раундов в день"},
@@ -160,6 +162,13 @@ async def start_round_now(
         await db.commit()
         await db.refresh(tpl)
 
+    # Force-start semantics: close existing active round (if any) before creating a new one.
+    from app.database.crud.contest import get_active_round_by_template
+    existing_round = await get_active_round_by_template(db, tpl.id)
+    if existing_round is not None:
+        existing_round.status = "finished"
+        await db.commit()
+
     payload = contest_rotation_service._build_payload_for_template(tpl)  # type: ignore[attr-defined]
     now = datetime.utcnow()
     ends = now + timedelta(hours=tpl.cooldown_hours)
@@ -194,9 +203,9 @@ async def manual_start_round(
         return
 
     # Проверяем, есть ли уже активный раунд для этого шаблона
-    from app.database.crud.contest import get_active_rounds
-    exists = await get_active_rounds(db, tpl.id)
-    if exists:
+    from app.database.crud.contest import get_active_round_by_template
+    exists = await get_active_round_by_template(db, tpl.id)
+    if exists is not None:
         await callback.answer(texts.t("ADMIN_ROUND_ALREADY_ACTIVE", "Раунд уже активен."), show_alert=True)
         await show_daily_contest(callback, db_user, db)
         return
@@ -239,6 +248,41 @@ async def prompt_edit_field(
     tpl = await _get_template(db, template_id)
     if not tpl or field not in EDITABLE_FIELDS:
         await callback.answer(texts.t("ADMIN_CONTEST_NOT_FOUND", "Конкурс не найден."), show_alert=True)
+        return
+
+    if field == "prize_type":
+        kb = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text=texts.t("ADMIN_PRIZE_TYPE_DAYS", "🕷️ Дни"),
+                        callback_data=f"admin_daily_set_prize_type_{template_id}_days",
+                    ),
+                    types.InlineKeyboardButton(
+                        text=texts.t("ADMIN_PRIZE_TYPE_GB", "⚪️ ГБ"),
+                        callback_data=f"admin_daily_set_prize_type_{template_id}_traffic_gb",
+                    ),
+                ],
+                [
+                    types.InlineKeyboardButton(
+                        text=texts.t("ADMIN_PRIZE_TYPE_BALANCE", "💰 Баланс"),
+                        callback_data=f"admin_daily_set_prize_type_{template_id}_balance",
+                    ),
+                    types.InlineKeyboardButton(
+                        text=texts.t("ADMIN_PRIZE_TYPE_CUSTOM", "🎁 Custom"),
+                        callback_data=f"admin_daily_set_prize_type_{template_id}_custom",
+                    ),
+                ],
+                [
+                    types.InlineKeyboardButton(text=texts.BACK, callback_data=f"admin_daily_contest_{template_id}")
+                ],
+            ]
+        )
+        await callback.message.edit_text(
+            texts.t("ADMIN_PRIZE_TYPE_PROMPT", "🏅 Выберите тип приза:"),
+            reply_markup=kb,
+        )
+        await callback.answer()
         return
 
     meta = EDITABLE_FIELDS[field]
@@ -301,7 +345,10 @@ async def process_edit_field(
         await state.clear()
         return
 
-    await update_template_fields(db, tpl, **{field: value})
+    if field == "prize_days":
+        await update_template_fields(db, tpl, prize_type="days", prize_value=str(value))
+    else:
+        await update_template_fields(db, tpl, **{field: value})
     back_kb = types.InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -498,13 +545,16 @@ async def reset_attempts(
         await callback.answer(texts.t("ADMIN_CONTEST_NOT_FOUND", "Конкурс не найден."), show_alert=True)
         return
 
-    from app.database.crud.contest import get_active_round_by_template, clear_attempts
-    round_obj = await get_active_round_by_template(db, tpl.id)
-    if not round_obj:
+    from app.database.crud.contest import get_active_rounds, clear_attempts
+    active_rounds = [r for r in await get_active_rounds(db) if r.template_id == tpl.id]
+    if not active_rounds:
         await callback.answer("Нет активного раунда", show_alert=True)
         return
 
-    deleted_count = await clear_attempts(db, round_obj.id)
+    deleted_count = 0
+    for rnd in active_rounds:
+        deleted_count += await clear_attempts(db, rnd.id)
+
     await callback.answer(f"Попытки сброшены: {deleted_count}", show_alert=True)
     await show_daily_contest(callback, db_user, db)
 
@@ -537,6 +587,62 @@ async def close_round(
     await show_daily_contest(callback, db_user, db)
 
 
+@admin_required
+@error_handler
+async def set_prize_type(
+    callback: types.CallbackQuery,
+    db_user,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    texts = get_texts(db_user.language)
+    parts = callback.data.split("_")
+    # admin_daily_set_prize_type_{template_id}_{type}
+    if len(parts) < 7:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    try:
+        template_id = int(parts[5])
+    except Exception:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    prize_type = "_".join(parts[6:])
+    tpl = await _get_template(db, template_id)
+    if not tpl:
+        await callback.answer(texts.t("ADMIN_CONTEST_NOT_FOUND", "Конкурс не найден."), show_alert=True)
+        return
+
+    await update_template_fields(db, tpl, prize_type=prize_type)
+
+    if prize_type == "custom":
+        await state.set_state(AdminStates.editing_daily_contest_field)
+        await state.update_data(template_id=template_id, field="prize_value")
+        kb = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text=texts.BACK,
+                        callback_data=f"admin_daily_contest_{template_id}",
+                    )
+                ]
+            ]
+        )
+        await callback.message.edit_text(
+            texts.t(
+                "ADMIN_CUSTOM_PRIZE_VALUE_PROMPT",
+                "🎁 Отправьте текст кастомного приза (это просто сообщение победителю):",
+            ),
+            reply_markup=kb,
+        )
+        await callback.answer()
+        return
+
+    await callback.answer(texts.t("ADMIN_UPDATED", "Обновлено"), show_alert=True)
+    await show_daily_contest(callback, db_user, db)
+
+
 def register_handlers(dp: Dispatcher):
     dp.callback_query.register(show_daily_contests, F.data == "admin_contests_daily")
     dp.callback_query.register(show_daily_contest, F.data.startswith("admin_daily_contest_"))
@@ -550,6 +656,7 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(close_round, F.data.startswith("admin_daily_close_"))
     dp.callback_query.register(prompt_edit_field, F.data.startswith("admin_daily_edit_"))
     dp.callback_query.register(edit_payload, F.data.startswith("admin_daily_payload_"))
+    dp.callback_query.register(set_prize_type, F.data.startswith("admin_daily_set_prize_type_"))
 
     dp.message.register(process_edit_field, AdminStates.editing_daily_contest_field)
     dp.message.register(process_payload, AdminStates.editing_daily_contest_value)

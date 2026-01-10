@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     ADMIN_REPORTS_SEND_TIME: Optional[str] = None
 
     CHANNEL_SUB_ID: Optional[str] = None
+    CHANNEL_POST_ID: Optional[str] = None
     CHANNEL_LINK: Optional[str] = None
     CHANNEL_IS_REQUIRED_SUB: bool = False
     CHANNEL_DISABLE_TRIAL_ON_UNSUBSCRIBE: bool = True
@@ -472,6 +473,16 @@ class Settings(BaseSettings):
     MULTI_TARIFF_ENABLED: bool = False
     SPIDERMAN_ALWAYS_SHOW_BUY_SUBSCRIPTION: bool = False
     SPIDERMAN_HIDE_BUY_TRAFFIC: bool = False
+    SPIDERMAN_MENU_MEDIA_MAIN_MENU: str = ""
+    SPIDERMAN_MENU_MEDIA_BUY: str = ""
+    SPIDERMAN_MENU_MEDIA_TARIFF_STANDARD: str = ""
+    SPIDERMAN_MENU_MEDIA_TARIFF_WHITE: str = ""
+    SPIDERMAN_MENU_MEDIA_SUPPORT: str = ""
+    SPIDERMAN_MENU_MEDIA_SUBSCRIPTION: str = ""
+    SPIDERMAN_MENU_MEDIA_REFERRAL: str = ""
+    SPIDERMAN_MENU_MEDIA_PURCHASE_SUCCESS: str = ""
+    SPIDERMAN_MENU_MEDIA_FALLBACK_PATH: str = ""
+    SPIDERMAN_MENU_ADMIN_MAIN: str = ""
     WHITE_TARIFF_SUFFIX: str = "_w"
     STANDARD_TARIFF_TAG: Optional[str] = None
     WHITE_TARIFF_TAG: Optional[str] = None
@@ -1263,11 +1274,13 @@ class Settings(BaseSettings):
         return applicable_discount
 
     def is_trial_paid_activation_enabled(self) -> bool:
-        # Если цена > 0, триал автоматически платный
-        # (TRIAL_PAYMENT_ENABLED теперь опционален - для обратной совместимости)
-        if self.TRIAL_ACTIVATION_PRICE > 0:
-            return True
-        return bool(self.TRIAL_PAYMENT_ENABLED)
+        # TRIAL_PAYMENT_ENABLED - главный переключатель платной активации.
+        # Если выключен - триал бесплатный, независимо от цены.
+        if not self.TRIAL_PAYMENT_ENABLED:
+            return False
+
+        # Если включен - проверяем что цена > 0.
+        return self.get_trial_activation_price() > 0
 
     def get_trial_activation_price(self) -> int:
         try:
@@ -2120,6 +2133,15 @@ class Settings(BaseSettings):
         "env_file_encoding": "utf-8",
         "extra": "ignore"
     }
+
+    @field_validator("FREEKASSA_SHOP_ID", "FREEKASSA_PAYMENT_SYSTEM_ID", mode="before")
+    @classmethod
+    def empty_string_to_none_for_optional_ints(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @field_validator("TIMEZONE")
     @classmethod

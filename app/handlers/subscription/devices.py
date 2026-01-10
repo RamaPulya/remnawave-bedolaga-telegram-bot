@@ -206,17 +206,19 @@ async def handle_change_devices(
         period_hint_days,
     )
 
-    prompt_text = texts.t(
-        "CHANGE_DEVICES_PROMPT",
-        (
-            "📱 <b>Изменение количества устройств</b>\n\n"
-            "Текущий лимит: {current_devices} устройств\n"
-            "Выберите новое количество устройств:\n\n"
-            "💡 <b>Важно:</b>\n"
-            "• При увеличении - доплата пропорционально оставшемуся времени\n"
-            "• При уменьшении - возврат средств не производится"
-        ),
-    ).format(current_devices=current_devices)
+    months_to_charge = get_remaining_months(subscription.end_date)
+    device_price_per_month = texts.format_price(settings.PRICE_PER_DEVICE)
+
+    prompt_text = (
+        "📱 <b>Лимит устройств</b>\n\n"
+        "Здесь вы можете увеличить или уменьшить лимит устройств для вашей подписки.\n"
+        "Например, чтобы подключить больше гаджетов.\n\n"
+        f"💵 <b>Стоимость 1 устройства:</b> {device_price_per_month} / мес\n"
+        f"📅 <b>Осталось месяцев:</b> {months_to_charge}\n"
+        "ℹ️ <i>Формула:</i> доп. устройства × месяцев = итоговая доплата\n\n"
+        f"🔢 <b>Текущий лимит:</b> {current_devices}\n\n"
+        "Выберите новый лимит ниже 👇"
+    )
 
     await callback.message.edit_text(
         prompt_text,
@@ -313,7 +315,7 @@ async def confirm_change_devices(
                 missing=texts.format_price(missing_kopeks),
             )
 
-            await callback.message.answer(
+            await callback.message.edit_text(
                 message_text,
                 reply_markup=get_insufficient_balance_keyboard(
                     db_user.language,
@@ -616,14 +618,17 @@ async def show_devices_page(
 
     pagination = paginate_list(devices_list, page=page, per_page=devices_per_page)
 
-    devices_text = texts.t(
-        "DEVICE_MANAGEMENT_OVERVIEW",
-        (
-            "🔄 <b>Управление устройствами</b>\n\n"
-            "📊 Всего подключено: {total} устройств\n"
-            "📄 Страница {page} из {pages}\n\n"
-        ),
-    ).format(total=len(devices_list), page=pagination.page, pages=pagination.total_pages)
+    subscription = getattr(db_user, 'subscription', None)
+    device_limit = getattr(subscription, 'device_limit', 0) if subscription else 0
+    total_devices = len(devices_list)
+    limit_display = "∞" if not device_limit else str(device_limit)
+
+    devices_text = (
+        "🖥️ <b>Управление устройствами</b>\n"
+        "Здесь вы можете удалять неиспользуемые устройства, чтобы освободить лимит для новых подключений.\n\n"
+        f"📱 <b>Ваши устройства:</b> {total_devices}/{limit_display}\n"
+        f"📄 <b>Страница:</b> {pagination.page} из {pagination.total_pages}\n\n"
+    )
 
     if pagination.items:
         devices_text += texts.t(

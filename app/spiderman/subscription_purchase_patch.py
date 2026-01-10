@@ -19,12 +19,12 @@ from app.handlers.subscription.common import (
 )
 from app.handlers.subscription.pricing import _build_subscription_period_prompt
 from app.handlers.subscription.promo import _build_promo_group_discount_text, _get_promo_offer_hint
-from app.handlers.subscription.summary import present_subscription_summary
 from app.keyboards.inline import (
     get_back_keyboard,
     get_devices_keyboard,
     get_happ_download_button_row,
     get_insufficient_balance_keyboard,
+    get_subscription_confirm_keyboard,
     get_subscription_period_keyboard,
 )
 from app.localization.texts import get_texts
@@ -37,6 +37,13 @@ from app.services.subscription_checkout_service import (
 from app.services.subscription_service import SubscriptionService
 from app.services.user_cart_service import user_cart_service
 from app.spiderman.tariff_context import TariffCode, normalize_tariff_code
+from app.spiderman.menu_media import (
+    SLOT_BUY,
+    SLOT_PURCHASE_SUCCESS,
+    SLOT_TARIFF_STANDARD,
+    SLOT_TARIFF_WHITE,
+    edit_or_answer_media,
+)
 from app.states import SubscriptionStates
 from app.utils.pricing_utils import (
     apply_percentage_discount,
@@ -57,6 +64,90 @@ _ORIGINAL_CONFIRM_PURCHASE = None
 _ORIGINAL_PREPARE_SUMMARY = None
 _ORIGINAL_HANDLE_CONFIG_BACK = None
 _ORIGINAL_REGISTER_HANDLERS = None
+
+
+def _normalize_media_slot(raw_value: Optional[str]) -> Optional[str]:
+    if raw_value in {SLOT_BUY, SLOT_TARIFF_STANDARD, SLOT_TARIFF_WHITE, SLOT_PURCHASE_SUCCESS}:
+        return raw_value
+    return None
+
+
+async def _set_state_media_slot(state: FSMContext, slot: Optional[str]) -> None:
+    if state is None:
+        return
+    data = await state.get_data()
+    normalized = _normalize_media_slot(slot)
+    if normalized:
+        data["spiderman_media_slot"] = normalized
+    else:
+        data.pop("spiderman_media_slot", None)
+    await state.set_data(data)
+
+
+async def _edit_message_for_state(
+    callback: types.CallbackQuery,
+    state: Optional[FSMContext],
+    text: str,
+    reply_markup: InlineKeyboardMarkup,
+    parse_mode: Optional[str] = "HTML",
+) -> None:
+    if state is not None:
+        data = await state.get_data()
+        media_slot = _normalize_media_slot(data.get("spiderman_media_slot"))
+        if media_slot:
+            await edit_or_answer_media(
+                callback=callback,
+                slot=media_slot,
+                caption=text,
+                keyboard=reply_markup,
+                parse_mode=parse_mode,
+            )
+            return
+    await _edit_message_text_or_caption(
+        callback.message,
+        text,
+        reply_markup,
+        parse_mode=parse_mode,
+    )
+
+
+async def present_subscription_summary(
+    callback: types.CallbackQuery,
+    state: FSMContext,
+    db_user,
+    texts: Optional = None,
+) -> bool:
+    if texts is None:
+        texts = get_texts(db_user.language)
+
+    data = await state.get_data()
+
+    from app.handlers.subscription.pricing import _prepare_subscription_summary
+
+    try:
+        summary_text, prepared_data = await _prepare_subscription_summary(db_user, data, texts)
+    except ValueError as exc:
+        logger.error(
+            "Ошибка в расчете цены подписки для пользователя %s: %s",
+            db_user.telegram_id,
+            exc,
+        )
+        await callback.answer("Ошибка расчета цены. Обратитесь в поддержку.", show_alert=True)
+        return False
+
+    await state.set_data(prepared_data)
+    await save_subscription_checkout_draft(db_user.id, prepared_data)
+
+    await _edit_message_for_state(
+        callback,
+        state,
+        summary_text,
+        get_subscription_confirm_keyboard(db_user.language),
+        parse_mode="HTML",
+    )
+
+    await state.set_state(SubscriptionStates.confirming_purchase)
+    return True
 
 
 async def _get_last_paid_period_days(
@@ -127,19 +218,108 @@ def _get_white_unlimited_end_date() -> datetime:
     return datetime(2099, 1, 1)
 
 
+def _format_optional_price(price_kopeks: Optional[int]) -> str:
+    if price_kopeks is None:
+        return "\u2014"
+    return settings.format_price(int(price_kopeks))
+
+
+def _get_min_price_for_periods(periods: List[int]) -> Optional[int]:
+    candidates: List[int] = []
+    for period in periods:
+        price = PERIOD_PRICES.get(int(period))
+        if price is None:
+            continue
+        candidates.append(int(price))
+    if not candidates:
+        return None
+    return min(candidates)
+
+
+def _get_min_white_package_price() -> Optional[int]:
+    candidates: List[int] = []
+    for package in settings.get_traffic_packages():
+        if not package.get("enabled", False):
+            continue
+        price = package.get("price")
+        if price is None:
+            continue
+        try:
+            candidates.append(int(price))
+        except (TypeError, ValueError):
+            continue
+    if not candidates:
+        return None
+    return min(candidates)
+
+
+def _get_min_white_package_gb() -> Optional[int]:
+    candidates: List[int] = []
+    for package in settings.get_traffic_packages():
+        if not package.get("enabled", False):
+            continue
+        gb = package.get("gb")
+        try:
+            gb_int = int(gb)
+        except (TypeError, ValueError):
+            continue
+        if gb_int <= 0:
+            continue
+        candidates.append(gb_int)
+    if not candidates:
+        return None
+    return min(candidates)
+
+
+def _get_min_white_price_per_gb_display() -> str:
+    # Фиксированное отображение цены (по требованиям SpiderMan-меню).
+    return "10 руб/ГБ"
+
+
+def _build_standard_period_prompt() -> str:
+    return (
+        "<b>🛒 Шаг 2: Выберите период подписки</b>\n\n"
+        "При покупке от:\n"
+        "➖ 3 месяцев — скидка 10%\n"
+        "➖ 6 месяцев — скидка 15%\n"
+        "➖ 12 месяцев — скидка 20%"
+    )
+
+
+def _build_standard_devices_prompt() -> str:
+    price_per_device = settings.format_price(settings.PRICE_PER_DEVICE)
+    max_devices = settings.MAX_DEVICES_LIMIT
+    return (
+        "<b>🛒 Шаг 3: Выберите количество устройств</b>\n\n"
+        "Выберите количество устройств:\n"
+        f"❗️ Дополнительное устройство — +{price_per_device}\n"
+        f"❗️ Максимум — до {max_devices} устройств на одну подписку."
+    )
+
+
+def _build_white_traffic_prompt() -> str:
+    return (
+        "<b>🛒 Шаг 2: Выберите объем трафика</b>\n\n"
+        "При покупке:\n"
+        "➖ От 20 ГБ — скидка 10%\n"
+        "➖ От 50 ГБ — скидка 20%\n"
+        "➖ От 100 ГБ — скидка 30%\n\n"
+    )
+
+
 def _build_tariff_keyboard(language: str) -> InlineKeyboardMarkup:
     texts = get_texts(language)
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🕷 Standard (Питер Паркер)",
+                    text="🕷️ STANDARD (Питер Паркер)",
                     callback_data="tariff_standard",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="⚪️ White (Саша белый)",
+                    text="⚪️ WHITE (Саша Белый)",
                     callback_data="tariff_white",
                 )
             ],
@@ -156,6 +336,29 @@ async def _build_tariff_prompt(db_user, texts, db: AsyncSession) -> str:
             "Давайте настроим вашу подписку под ваши потребности.\n\n"
             "Сначала выберите тип подписки:\n"
         ),
+    ).rstrip()
+
+    available_periods = settings.get_available_subscription_periods()
+    standard_min_price = _get_min_price_for_periods(available_periods)
+    white_min_price = _get_min_white_package_price()
+    white_price_per_gb = _get_min_white_price_per_gb_display()
+    white_min_gb = _get_min_white_package_gb()
+
+    base_text = (
+        "<b>🛒 Шаг 1: Выберите тарифный план</b>\n\n"
+        "Мы предлагаем вам два типа тарифов - <b>STANDARD</b> и <b>WHITE</b>\n"
+        "Их можно использовать как вместе так и по отдельности, они независимы и могут дополнять друг друга.\n"
+        "Каждый тариф имеет свой ключ доступа\n\n"
+        "<blockquote><b>Standart: 🕷️ Питер Паркер</b>\n"
+        "Скорость до 100 Мбит/с! Несколько стран. ⛔️ Встроенные блокировщики рекламы + ▶️ YouTube без рекламы</blockquote>\n\n"
+        "📱 Устройств: от 1\n"
+        "📊 Трафик: ♾️ неограничен\n"
+        f"💰 Цена: от {_format_optional_price(standard_min_price)}\n\n"
+        "<blockquote><b>White: ⚪️ Саша Белый</b>\n"
+        "Дает возможность пользоваться мобильной связью, когда ее глушат [📶 LTE/4G]. Работает при белых списках. Необходимо приобретать пакеты ГБ. Невыгодно использовать на 🛜 Wi-Fi</blockquote>\n\n"
+        "📱 Устройств: ♾️ неограничено\n"
+        f"📊 Трафик: {white_price_per_gb} | Минимум {white_min_gb or '—'} ГБ\n"
+        f"💰 Цена: {_format_optional_price(white_min_price)}"
     ).rstrip()
     lines: List[str] = [base_text]
 
@@ -230,8 +433,10 @@ async def _show_tariff_selection(
 ) -> None:
     texts = get_texts(db_user.language)
     prompt_text = await _build_tariff_prompt(db_user, texts, db)
-    await _edit_message_text_or_caption(
-        callback.message,
+    await _set_state_media_slot(state, SLOT_BUY)
+    await _edit_message_for_state(
+        callback,
+        state,
         prompt_text,
         _build_tariff_keyboard(db_user.language),
     )
@@ -245,9 +450,16 @@ async def _show_period_selection(
     db: AsyncSession,
 ) -> None:
     texts = get_texts(db_user.language)
-    prompt_text = await _build_subscription_period_prompt(db_user, texts, db)
-    await _edit_message_text_or_caption(
-        callback.message,
+    data = await state.get_data()
+    tariff_raw = data.get("tariff_code") if data else None
+    tariff_code = normalize_tariff_code(tariff_raw) if tariff_raw else None
+    if tariff_code == TariffCode.STANDARD.value:
+        prompt_text = _build_standard_period_prompt()
+    else:
+        prompt_text = await _build_subscription_period_prompt(db_user, texts, db)
+    await _edit_message_for_state(
+        callback,
+        state,
         prompt_text,
         _build_period_keyboard_with_back(db_user.language, db_user),
     )
@@ -263,8 +475,10 @@ async def start_subscription_purchase(
     texts = get_texts(db_user.language)
     prompt_text = await _build_tariff_prompt(db_user, texts, db)
 
-    await _edit_message_text_or_caption(
-        callback.message,
+    await _set_state_media_slot(state, SLOT_BUY)
+    await _edit_message_for_state(
+        callback,
+        state,
         prompt_text,
         _build_tariff_keyboard(db_user.language),
     )
@@ -286,6 +500,7 @@ async def start_subscription_purchase(
         "devices": initial_devices,
         "total_price": 0,
         "traffic_gb": None,
+        "spiderman_media_slot": SLOT_BUY,
     }
 
     await state.set_data(initial_data)
@@ -357,6 +572,7 @@ async def select_tariff(
             "total_price": 0,
             "traffic_gb": 0,
             "spiderman_extend_mode": True,
+            "spiderman_media_slot": SLOT_TARIFF_STANDARD,
         }
 
         await state.set_data(data)
@@ -387,8 +603,10 @@ async def select_tariff(
 
     if tariff_code == TariffCode.STANDARD.value:
         data["traffic_gb"] = 0
+        data["spiderman_media_slot"] = SLOT_TARIFF_STANDARD
     else:
         data["traffic_gb"] = None
+        data["spiderman_media_slot"] = SLOT_TARIFF_WHITE
 
     if tariff_code == TariffCode.WHITE.value:
         texts = get_texts(db_user.language)
@@ -403,9 +621,10 @@ async def select_tariff(
             await callback.answer("⚠️ Пакеты трафика не настроены", show_alert=True)
             return
 
-        await _edit_message_text_or_caption(
-            callback.message,
-            texts.SELECT_TRAFFIC,
+        await _edit_message_for_state(
+            callback,
+            state,
+            _build_white_traffic_prompt(),
             _build_tariff_traffic_keyboard(db_user.language),
         )
         await state.set_state(SubscriptionStates.selecting_traffic)
@@ -444,9 +663,10 @@ async def select_period(
             await callback.answer("⚠️ Пакеты трафика не настроены", show_alert=True)
             return
         await state.set_data(data)
-        await _edit_message_text_or_caption(
-            callback.message,
-            texts.SELECT_TRAFFIC,
+        await _edit_message_for_state(
+            callback,
+            state,
+            _build_white_traffic_prompt(),
             _build_tariff_traffic_keyboard(db_user.language),
         )
         await state.set_state(SubscriptionStates.selecting_traffic)
@@ -461,9 +681,11 @@ async def select_period(
 
     if settings.is_devices_selection_enabled():
         selected_devices = data.get("devices", settings.DEFAULT_DEVICE_LIMIT)
-        await callback.message.edit_text(
-            texts.SELECT_DEVICES,
-            reply_markup=get_devices_keyboard(selected_devices, db_user.language),
+        await _edit_message_for_state(
+            callback,
+            state,
+            _build_standard_devices_prompt(),
+            get_devices_keyboard(selected_devices, db_user.language),
         )
         await state.set_state(SubscriptionStates.selecting_devices)
         await callback.answer()
@@ -765,10 +987,12 @@ async def confirm_purchase(
             keyboard.append([types.InlineKeyboardButton(text="🆘 Обжаловать", url=support_url)])
         keyboard.append([types.InlineKeyboardButton(text=texts.BACK, callback_data="subscription")])
 
-        await callback.message.edit_text(
+        await _edit_message_for_state(
+            callback,
+            state,
             f"🚫 <b>Покупка/продление подписки ограничено</b>\n\n{reason}\n\n"
             "Если вы считаете это ошибкой, вы можете обжаловать решение.",
-            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard),
+            types.InlineKeyboardMarkup(inline_keyboard=keyboard),
         )
         await callback.answer()
         return
@@ -793,12 +1017,14 @@ async def confirm_purchase(
 
     period_days = data.get("period_days")
     if period_days is None:
-        await callback.message.edit_text(
+        await _edit_message_for_state(
+            callback,
+            state,
             texts.t(
                 "SUBSCRIPTION_PURCHASE_ERROR",
                 "Ошибка при оформлении подписки. Попробуйте начать сначала.",
             ),
-            reply_markup=get_back_keyboard(db_user.language),
+            get_back_keyboard(db_user.language),
         )
         await callback.answer()
         return
@@ -822,12 +1048,14 @@ async def confirm_purchase(
 
     selected_countries = data.get("countries", [])
     if not selected_countries:
-        await callback.message.edit_text(
+        await _edit_message_for_state(
+            callback,
+            state,
             texts.t(
                 "COUNTRIES_MINIMUM_REQUIRED",
                 "❌ Нельзя отключить все страны. Должна быть подключена хотя бы одна страна.",
             ),
-            reply_markup=get_back_keyboard(db_user.language),
+            get_back_keyboard(db_user.language),
         )
         await callback.answer()
         return
@@ -1067,9 +1295,11 @@ async def confirm_purchase(
         }
         await user_cart_service.save_user_cart(db_user.id, cart_data)
 
-        await callback.message.edit_text(
+        await _edit_message_for_state(
+            callback,
+            state,
             message_text,
-            reply_markup=get_insufficient_balance_keyboard(
+            get_insufficient_balance_keyboard(
                 db_user.language,
                 resume_callback=resume_callback,
                 amount_kopeks=missing_kopeks,
@@ -1113,9 +1343,11 @@ async def confirm_purchase(
                 missing=texts.format_price(missing_kopeks),
             )
 
-            await callback.message.edit_text(
+            await _edit_message_for_state(
+                callback,
+                state,
                 message_text,
-                reply_markup=get_insufficient_balance_keyboard(
+                get_insufficient_balance_keyboard(
                     db_user.language,
                     resume_callback=resume_callback,
                     amount_kopeks=missing_kopeks,
@@ -1210,12 +1442,14 @@ async def confirm_purchase(
                 existing_subscription.device_limit = selected_devices
 
             if not selected_countries:
-                await callback.message.edit_text(
+                await _edit_message_for_state(
+                    callback,
+                    state,
                     texts.t(
                         "COUNTRIES_MINIMUM_REQUIRED",
                         "❌ Нельзя отключить все страны. Должна быть подключена хотя бы одна страна.",
                     ),
-                    reply_markup=get_back_keyboard(db_user.language),
+                    get_back_keyboard(db_user.language),
                 )
                 await callback.answer()
                 return
@@ -1255,12 +1489,14 @@ async def confirm_purchase(
                     resolved_device_limit = forced_disabled_limit or default_device_limit
 
             if not selected_countries:
-                await callback.message.edit_text(
+                await _edit_message_for_state(
+                    callback,
+                    state,
                     texts.t(
                         "COUNTRIES_MINIMUM_REQUIRED",
                         "❌ Нельзя отключить все страны. Должна быть подключена хотя бы одна страна.",
                     ),
-                    reply_markup=get_back_keyboard(db_user.language),
+                    get_back_keyboard(db_user.language),
                 )
                 await callback.answer()
                 return
@@ -1412,6 +1648,12 @@ async def confirm_purchase(
             if discount_note:
                 success_text = f"{success_text}\n\n{discount_note}"
 
+            tariff_code = normalize_tariff_code(getattr(subscription, "tariff_code", None))
+            is_white_tariff = tariff_code == TariffCode.WHITE.value
+            connect_button_suffix = " ⚪️" if is_white_tariff else " 🕷"
+            connect_button_text = f"{texts.t('CONNECT_BUTTON', '🔗 Подключиться')}{connect_button_suffix}"
+            happ_callback = "open_subscription_link_white" if is_white_tariff else "open_subscription_link"
+
             connect_mode = settings.CONNECT_BUTTON_MODE
 
             if connect_mode == "miniapp_subscription":
@@ -1419,7 +1661,7 @@ async def confirm_purchase(
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                                text=connect_button_text,
                                 web_app=types.WebAppInfo(url=subscription_link),
                             )
                         ],
@@ -1446,7 +1688,7 @@ async def confirm_purchase(
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                                text=connect_button_text,
                                 web_app=types.WebAppInfo(url=settings.MINIAPP_CUSTOM_URL),
                             )
                         ],
@@ -1462,7 +1704,7 @@ async def confirm_purchase(
                 rows = [
                     [
                         InlineKeyboardButton(
-                            text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                            text=connect_button_text,
                             url=subscription_link,
                         )
                     ]
@@ -1483,8 +1725,8 @@ async def confirm_purchase(
                 rows = [
                     [
                         InlineKeyboardButton(
-                            text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
-                            callback_data="open_subscription_link",
+                            text=connect_button_text,
+                            callback_data=happ_callback,
                         )
                     ]
                 ]
@@ -1505,7 +1747,7 @@ async def confirm_purchase(
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                                text=connect_button_text,
                                 callback_data="subscription_connect",
                             )
                         ],
@@ -1518,21 +1760,26 @@ async def confirm_purchase(
                     ]
                 )
 
-            await callback.message.edit_text(
+            await _set_state_media_slot(state, SLOT_PURCHASE_SUCCESS)
+            await _edit_message_for_state(
+                callback,
+                state,
                 success_text,
-                reply_markup=connect_keyboard,
+                connect_keyboard,
                 parse_mode="HTML",
             )
         else:
             purchase_text = texts.SUBSCRIPTION_PURCHASED
             if discount_note:
                 purchase_text = f"{purchase_text}\n\n{discount_note}"
-            await callback.message.edit_text(
+            await _edit_message_for_state(
+                callback,
+                state,
                 texts.t(
                     "SUBSCRIPTION_LINK_GENERATING_NOTICE",
                     "{purchase_text}\n\nСсылка генерируется, перейдите в раздел 'Моя подписка' через несколько секунд.",
                 ).format(purchase_text=purchase_text),
-                reply_markup=get_back_keyboard(db_user.language),
+                get_back_keyboard(db_user.language),
             )
 
         purchase_completed = True
@@ -1546,9 +1793,11 @@ async def confirm_purchase(
 
     except Exception as error:
         logger.error("Ошибка покупки подписки: %s", error)
-        await callback.message.edit_text(
+        await _edit_message_for_state(
+            callback,
+            state,
             texts.ERROR,
-            reply_markup=get_back_keyboard(db_user.language),
+            get_back_keyboard(db_user.language),
         )
 
     if purchase_completed:
@@ -1593,25 +1842,31 @@ async def handle_subscription_config_back(
             await _show_period_selection(callback, state, db_user, db)
     elif current_state == SubscriptionStates.selecting_devices.state:
         if tariff_code == TariffCode.WHITE.value:
-            await callback.message.edit_text(
-                texts.SELECT_TRAFFIC,
-                reply_markup=_build_tariff_traffic_keyboard(db_user.language),
+            await _edit_message_for_state(
+                callback,
+                state,
+                _build_white_traffic_prompt(),
+                _build_tariff_traffic_keyboard(db_user.language),
             )
             await state.set_state(SubscriptionStates.selecting_traffic)
         else:
             await _show_period_selection(callback, state, db_user, db)
     elif current_state == SubscriptionStates.confirming_purchase.state:
         if tariff_code == TariffCode.WHITE.value:
-            await callback.message.edit_text(
-                texts.SELECT_TRAFFIC,
-                reply_markup=_build_tariff_traffic_keyboard(db_user.language),
+            await _edit_message_for_state(
+                callback,
+                state,
+                _build_white_traffic_prompt(),
+                _build_tariff_traffic_keyboard(db_user.language),
             )
             await state.set_state(SubscriptionStates.selecting_traffic)
         elif settings.is_devices_selection_enabled():
             selected_devices = data.get("devices", settings.DEFAULT_DEVICE_LIMIT)
-            await callback.message.edit_text(
-                texts.SELECT_DEVICES,
-                reply_markup=get_devices_keyboard(selected_devices, db_user.language),
+            await _edit_message_for_state(
+                callback,
+                state,
+                _build_standard_devices_prompt(),
+                get_devices_keyboard(selected_devices, db_user.language),
             )
             await state.set_state(SubscriptionStates.selecting_devices)
         else:
@@ -1653,8 +1908,10 @@ def register_handlers(dp):
 
 def apply_subscription_purchase_patches() -> None:
     import app.handlers.subscription.autopay as autopay
+    import app.handlers.subscription.countries as countries
     import app.handlers.subscription.pricing as pricing
     import app.handlers.subscription.purchase as purchase
+    import app.handlers.subscription.summary as summary
     import app.handlers.subscription.traffic as traffic
     import app.handlers.subscription as subscription_pkg
 
@@ -1683,10 +1940,14 @@ def apply_subscription_purchase_patches() -> None:
     purchase.select_traffic = select_traffic
     purchase._prepare_subscription_summary = _prepare_subscription_summary
     purchase.register_handlers = register_handlers
+    purchase.present_subscription_summary = present_subscription_summary
     traffic.select_traffic = select_traffic
+    traffic.present_subscription_summary = present_subscription_summary
     pricing._prepare_subscription_summary = _prepare_subscription_summary
     autopay.handle_subscription_config_back = handle_subscription_config_back
     purchase.handle_subscription_config_back = handle_subscription_config_back
+    summary.present_subscription_summary = present_subscription_summary
+    countries.present_subscription_summary = present_subscription_summary
 
     subscription_pkg.start_subscription_purchase = start_subscription_purchase
     subscription_pkg.select_period = select_period

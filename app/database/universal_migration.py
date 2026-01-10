@@ -3883,6 +3883,10 @@ async def create_subscription_events_table():
         return False
 
 async def fix_subscription_duplicates_universal():
+    if settings.MULTI_TARIFF_ENABLED:
+        logger.info("🕷️ Очистка дубликатов подписок пропущена (MULTI_TARIFF_ENABLED=true)")
+        return 0
+
     async with engine.begin() as conn:
         db_type = await get_database_type()
         logger.info(f"Обнаружен тип базы данных: {db_type}")
@@ -4881,10 +4885,13 @@ async def migrate_contest_templates_prize_columns() -> bool:
     try:
         prize_type_exists = await check_column_exists("contest_templates", "prize_type")
         prize_value_exists = await check_column_exists("contest_templates", "prize_value")
+        prize_days_exists = await check_column_exists("contest_templates", "prize_days")
 
-        if prize_type_exists and prize_value_exists:
+        if prize_type_exists and prize_value_exists and not prize_days_exists:
             logger.info("Колонки prize_type и prize_value уже существуют в contest_templates")
             return True
+        if prize_type_exists and prize_value_exists:
+            logger.info("Колонки prize_type и prize_value уже существуют в contest_templates")
 
         async with engine.begin() as conn:
             db_type = await get_database_type()
@@ -4904,6 +4911,7 @@ async def migrate_contest_templates_prize_columns() -> bool:
                         "ALTER TABLE contest_templates ADD COLUMN prize_type VARCHAR(20) NOT NULL DEFAULT 'days'"
                     ))
                 logger.info("✅ Добавлена колонка prize_type в contest_templates")
+                prize_type_exists = True
 
             # Добавляем prize_value
             if not prize_value_exists:
@@ -4920,14 +4928,24 @@ async def migrate_contest_templates_prize_columns() -> bool:
                         "ALTER TABLE contest_templates ADD COLUMN prize_value VARCHAR(50) NOT NULL DEFAULT '1'"
                     ))
                 logger.info("✅ Добавлена колонка prize_value в contest_templates")
+                prize_value_exists = True
 
             # Мигрируем данные из prize_days в prize_value (если prize_days существует)
-            prize_days_exists = await check_column_exists("contest_templates", "prize_days")
-            if prize_days_exists:
+            if prize_days_exists and prize_type_exists and prize_value_exists:
                 await conn.execute(text(
                     "UPDATE contest_templates SET prize_value = CAST(prize_days AS VARCHAR) WHERE prize_type = 'days'"
                 ))
                 logger.info("✅ Данные из prize_days перенесены в prize_value")
+                if db_type == "postgresql":
+                    await conn.execute(text(
+                        "ALTER TABLE contest_templates ALTER COLUMN prize_days SET DEFAULT 1"
+                    ))
+                    logger.info("✅ Установлен DEFAULT 1 для prize_days в contest_templates")
+                elif db_type == "mysql":
+                    await conn.execute(text(
+                        "ALTER TABLE contest_templates MODIFY prize_days INTEGER NOT NULL DEFAULT 1"
+                    ))
+                    logger.info("✅ Установлен DEFAULT 1 для prize_days в contest_templates")
 
         return True
 

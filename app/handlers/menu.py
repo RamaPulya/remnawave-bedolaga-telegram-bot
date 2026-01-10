@@ -168,11 +168,13 @@ async def show_main_menu(
     db_user.last_activity = datetime.utcnow()
     await db.commit()
 
-    has_active_subscription = bool(db_user.subscription and db_user.subscription.is_active)
-    subscription_is_active = False
-
-    if db_user.subscription:
-        subscription_is_active = db_user.subscription.is_active
+    subscription_standard = getattr(db_user, "__dict__", {}).get("subscription")
+    subscription_white = getattr(db_user, "__dict__", {}).get("subscription_white")
+    has_active_subscription = bool(
+        (subscription_standard and subscription_standard.is_active)
+        or (settings.MULTI_TARIFF_ENABLED and subscription_white and subscription_white.is_active)
+    )
+    subscription_is_active = has_active_subscription
 
     menu_text = await get_main_menu_text(db_user, texts, db)
 
@@ -1035,11 +1037,13 @@ async def handle_back_to_menu(
 
     texts = get_texts(db_user.language)
 
-    has_active_subscription = bool(db_user.subscription and db_user.subscription.is_active)
-    subscription_is_active = False
-
-    if db_user.subscription:
-        subscription_is_active = db_user.subscription.is_active
+    subscription_standard = getattr(db_user, "__dict__", {}).get("subscription")
+    subscription_white = getattr(db_user, "__dict__", {}).get("subscription_white")
+    has_active_subscription = bool(
+        (subscription_standard and subscription_standard.is_active)
+        or (settings.MULTI_TARIFF_ENABLED and subscription_white and subscription_white.is_active)
+    )
+    subscription_is_active = has_active_subscription
 
     menu_text = await get_main_menu_text(db_user, texts, db)
 
@@ -1184,14 +1188,143 @@ def _insert_random_message(base_text: str, random_message: str, action_prompt: s
     return f"{base_text}\n\n{random_message}"
 
 
+def _is_subscription_active(subscription) -> bool:
+    if subscription is None:
+        return False
+    actual_status = (getattr(subscription, "actual_status", "") or "").lower()
+    if actual_status not in {"active", "trial"}:
+        return False
+    end_date = getattr(subscription, "end_date", None)
+    if not end_date:
+        return False
+    return end_date > datetime.utcnow()
+
+
+def _is_trial_subscription(subscription) -> bool:
+    if subscription is None:
+        return False
+
+    if bool(getattr(subscription, "is_trial", False)):
+        return True
+
+    actual_status = (getattr(subscription, "actual_status", "") or "").lower()
+    if actual_status == "trial":
+        return True
+
+    status = (getattr(subscription, "status", "") or "").lower()
+    if status == "trial":
+        return True
+
+    tags = getattr(subscription, "tags", None)
+    if isinstance(tags, (list, tuple, set)):
+        return any(str(tag).upper() == "TRIAL" for tag in tags)
+    if isinstance(tags, str) and "TRIAL" in tags.upper():
+        return True
+
+    tag = getattr(subscription, "tag", None)
+    if isinstance(tag, str) and tag.upper() == "TRIAL":
+        return True
+
+    return False
+
+
+def _format_main_menu_tariff_block(
+    *,
+    prefix_emoji: str,
+    tariff_display: str,
+    subscription,
+    include_end_date: bool,
+    include_traffic: bool,
+) -> str:
+    if not _is_subscription_active(subscription):
+        lines = [
+            f"{prefix_emoji} Подписка: отсутствует",
+            f"📦 Тариф: {tariff_display}",
+        ]
+        return "\n".join(lines)
+
+    lines = [
+        f"{prefix_emoji} Подписка: 💎 Активна",
+        f"📦 Тариф: {tariff_display}",
+    ]
+
+    if include_end_date:
+        end_date = getattr(subscription, "end_date", None)
+        if end_date:
+            date_text = format_local_datetime(end_date, "%d.%m.%Y")
+            days_left = max(0, int((end_date - datetime.utcnow()).days))
+            lines.append(f"📅 до {date_text} ({days_left} дн.)")
+
+    if include_traffic:
+        traffic_limit = float(getattr(subscription, "traffic_limit_gb", 0) or 0)
+        traffic_used = float(getattr(subscription, "traffic_used_gb", 0.0) or 0.0)
+        if traffic_limit <= 0:
+            lines.append("📊 Трафик: безлимит")
+        else:
+            remaining = max(0.0, traffic_limit - traffic_used)
+            lines.append(f"📊 Трафик: {remaining:.2f} Гб")
+
+    return "\n".join(lines)
+
+
 async def get_main_menu_text(user, texts, db: AsyncSession):
 
-    base_text = texts.MAIN_MENU.format(
-        user_name=user.full_name,
-        subscription_status=_get_subscription_status(user, texts)
-    )
-
     action_prompt = texts.t("MAIN_MENU_ACTION_PROMPT", "Выберите действие:")
+
+    language_code = (getattr(user, "language", None) or settings.DEFAULT_LANGUAGE).split("-")[0].lower()
+    if language_code == "ru" and settings.MULTI_TARIFF_ENABLED:
+        user_name = html.escape(getattr(user, "full_name", "") or "")
+        try:
+            from app.database.crud.subscription import get_subscription_by_user_id_and_tariff
+            from app.spiderman.tariff_context import TariffCode
+
+            standard_subscription = await get_subscription_by_user_id_and_tariff(
+                db, user.id, TariffCode.STANDARD.value
+            )
+            white_subscription = await get_subscription_by_user_id_and_tariff(
+                db, user.id, TariffCode.WHITE.value
+            )
+        except Exception as exc:
+            logger.error(
+                "Ошибка загрузки подписок (multi-tariff) для пользователя %s: %s",
+                user.id,
+                exc,
+            )
+            standard_subscription = getattr(user, "__dict__", {}).get("subscription")
+            white_subscription = None
+
+        standard_tariff_display = (
+            "🧪 Тестовая подписка"
+            if _is_trial_subscription(standard_subscription)
+            else "🕷 Питер Паркер"
+        )
+
+        base_text = (
+            f"<b>👤 {user_name}</b>\n\n"
+            + _format_main_menu_tariff_block(
+                prefix_emoji="🛜",
+                tariff_display=standard_tariff_display,
+                subscription=standard_subscription,
+                include_end_date=True,
+                include_traffic=False,
+            )
+            + "\n\n"
+            + _format_main_menu_tariff_block(
+                prefix_emoji="📶",
+                tariff_display="⚪️ Саша Белый",
+                subscription=white_subscription,
+                include_end_date=False,
+                include_traffic=True,
+            )
+            + "\n\n"
+            + action_prompt
+            + "\n"
+        )
+    else:
+        base_text = texts.MAIN_MENU.format(
+            user_name=f"<b>{html.escape(user.full_name or '')}</b>",
+            subscription_status=_get_subscription_status(user, texts),
+        )
 
     info_sections: list[str] = []
 

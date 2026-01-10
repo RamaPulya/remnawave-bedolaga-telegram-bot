@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from urllib.parse import quote
 
 import qrcode
 from aiogram import Dispatcher, F, types
@@ -77,7 +78,7 @@ async def show_referral_info(
             "REFERRAL_STATS_MONTH_EARNED",
             "• За последний месяц: <b>{amount}</b>",
         ).format(amount=texts.format_price(summary['month_earned_kopeks']))
-        + "\n\n"
+        + "\n\n<blockquote>"
         + texts.t("REFERRAL_REWARDS_HEADER", "🎁 <b>Как работают награды:</b>")
         + "\n"
         + texts.t(
@@ -92,12 +93,21 @@ async def show_referral_info(
             "REFERRAL_REWARD_INVITER",
             "• Вы получаете при первом пополнении реферала: <b>{bonus}</b>",
         ).format(bonus=texts.format_price(settings.REFERRAL_INVITER_BONUS_KOPEKS))
+        + (
+            "\n"
+            + texts.t(
+                "REFERRAL_REWARD_WITHDRAWAL",
+                "• Вывод доступен от 1000₽ через техподдержку",
+            )
+            if (db_user.language or settings.DEFAULT_LANGUAGE).split("-")[0].lower() == "ru"
+            else ""
+        )
         + "\n"
         + texts.t(
             "REFERRAL_REWARD_COMMISSION",
             "• Комиссия с каждого пополнения реферала: <b>{percent}%</b>",
         ).format(percent=get_effective_referral_commission_percent(db_user))
-        + "\n\n"
+        + "</blockquote>\n\n"
         + texts.t("REFERRAL_LINK_TITLE", "🔗 <b>Ваша реферальная ссылка:</b>")
         + f"\n<code>{referral_link}</code>\n\n"
         + texts.t("REFERRAL_CODE_TITLE", "🆔 <b>Ваш код:</b> <code>{code}</code>").format(code=db_user.referral_code)
@@ -435,16 +445,49 @@ async def create_invite_message(
         + f"\n{referral_link}"
     )
 
-    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(
-            text=texts.t("REFERRAL_SHARE_BUTTON", "📤 Поделиться"),
-            switch_inline_query=invite_text
-        )],
-        [types.InlineKeyboardButton(
-            text=texts.BACK,
-            callback_data="menu_referrals"
-        )]
-    ])
+    is_ru = (db_user.language or settings.DEFAULT_LANGUAGE).split("-")[0].lower() == "ru"
+    share_url = None
+    if is_ru:
+        minimum = texts.format_price(settings.REFERRAL_MINIMUM_TOPUP_KOPEKS)
+        bonus = texts.format_price(settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS)
+
+        invite_text = (
+            "🕷️ Присоединяйся к SpiderManVPN!\n"
+            f"💎 При первом пополнении от {minimum} ты получишь {bonus} бонусом на баланс!\n\n"
+            "🚀 Быстрое подключение\n"
+            "▶️ YouTube без реклым\n"
+            "📶  Работа при глушилках\n\n"
+            "🕸  Питер Паркер и безопасная мировая паутина ждут тебя!\n"
+            "👇 Переходи по ссылке:\n"
+            f"{referral_link}"
+        )
+
+        share_text = (
+            "🕷️ Присоединяйся к SpiderManVPN!\n"
+            f"💎 При первом пополнении от {minimum} ты получишь {bonus} бонусом на баланс!\n\n"
+            "🚀 Быстрое подключение\n"
+            "▶️ YouTube без реклым\n"
+            "📶  Работа при глушилках\n\n"
+            "🕸  Питер Паркер и безопасная мировая паутина ждут тебя!\n\n"
+            "👇 Переходи по ссылке:"
+        )
+
+        share_url = f"https://t.me/share/url?url={quote(referral_link)}&text={quote(share_text)}"
+
+    share_button = types.InlineKeyboardButton(
+        text=texts.t("REFERRAL_SHARE_BUTTON", "📤 Поделиться"),
+        url=share_url,
+    ) if share_url else types.InlineKeyboardButton(
+        text=texts.t("REFERRAL_SHARE_BUTTON", "📤 Поделиться"),
+        switch_inline_query=invite_text,
+    )
+
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [share_button],
+            [types.InlineKeyboardButton(text=texts.BACK, callback_data="menu_referrals")],
+        ]
+    )
 
     await edit_or_answer_photo(
         callback,

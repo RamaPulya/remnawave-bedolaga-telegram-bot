@@ -17,6 +17,16 @@ def is_qr_message(message: Message) -> bool:
 
 _original_answer = Message.answer
 _original_edit_text = Message.edit_text
+_original_edit_caption = Message.edit_caption
+
+
+def _filter_edit_caption_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    allowed: Dict[str, Any] = {}
+    if "reply_markup" in kwargs:
+        allowed["reply_markup"] = kwargs["reply_markup"]
+    if "parse_mode" in kwargs:
+        allowed["parse_mode"] = kwargs["parse_mode"]
+    return allowed
 
 
 def _get_language(message: Message) -> str | None:
@@ -154,7 +164,89 @@ async def _edit_with_photo(self: Message, text: str, **kwargs):
             except Exception:
                 pass
             return await _original_answer(self, text, **kwargs)
-    return await _original_edit_text(self, text, **kwargs)
+
+    # Для медиа-сообщений (видео/гиф и т.п.) edit_text запрещён Telegram API.
+    # Если это сообщение с подписью (caption) — редактируем caption, не удаляя сообщение.
+    if self.text is None and not self.photo and (
+        bool(getattr(self, "video", None))
+        or bool(getattr(self, "animation", None))
+        or bool(getattr(self, "document", None))
+        or bool(getattr(self, "audio", None))
+        or bool(getattr(self, "voice", None))
+    ):
+        language = _get_language(self)
+        try:
+            if text is not None and len(text) > 900:
+                try:
+                    await self.delete()
+                except Exception:
+                    pass
+                return await _original_answer(self, text, **kwargs)
+        except Exception:
+            pass
+
+        try:
+            return await _original_edit_caption(self, text, **_filter_edit_caption_kwargs(kwargs))
+        except TelegramBadRequest as error:
+            if is_privacy_restricted_error(error):
+                fallback_text = append_privacy_hint(text, language)
+                safe_kwargs = prepare_privacy_safe_kwargs(kwargs)
+                try:
+                    await self.delete()
+                except Exception:
+                    pass
+                return await _original_answer(self, fallback_text, **safe_kwargs)
+
+            if "message is not modified" in str(error).lower():
+                return self
+
+            try:
+                await self.delete()
+            except Exception:
+                pass
+            return await _answer_with_photo(self, text, **kwargs)
+
+    try:
+        return await _original_edit_text(self, text, **kwargs)
+    except TelegramBadRequest as error:
+        if is_privacy_restricted_error(error):
+            language = _get_language(self)
+            fallback_text = append_privacy_hint(text, language)
+            safe_kwargs = prepare_privacy_safe_kwargs(kwargs)
+            try:
+                await self.delete()
+            except Exception:
+                pass
+            return await _original_answer(self, fallback_text, **safe_kwargs)
+
+        description = str(error) or ""
+        if "there is no text in the message to edit" in description.lower():
+            # Telegram вернул ошибку, потому что сообщение на самом деле медиа (GIF/видео/документ),
+            # но мы попытались редактировать его как текст. Сначала пробуем обновить caption.
+            language = _get_language(self)
+            try:
+                return await _original_edit_caption(self, text, **_filter_edit_caption_kwargs(kwargs))
+            except TelegramBadRequest as caption_error:
+                if is_privacy_restricted_error(caption_error):
+                    fallback_text = append_privacy_hint(text, language)
+                    safe_kwargs = prepare_privacy_safe_kwargs(kwargs)
+                    try:
+                        await self.delete()
+                    except Exception:
+                        pass
+                    return await _original_answer(self, fallback_text, **safe_kwargs)
+
+                if "message is not modified" in str(caption_error).lower():
+                    return self
+            except Exception:
+                pass
+
+            try:
+                await self.delete()
+            except Exception:
+                pass
+            return await _answer_with_photo(self, text, **kwargs)
+        raise
 
 
 def patch_message_methods():

@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 
 from aiogram import types
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +11,24 @@ from app.spiderman.subscription_crud_patch import get_subscription_by_user_id
 from app.keyboards import inline as inline_kb
 
 logger = logging.getLogger(__name__)
+
+
+def _get_remaining_months_for_devices(end_date: datetime) -> int:
+    """
+    Правило для докупки устройств:
+    - считаем полные месяцы (30 дней)
+    - добавляем +1 месяц, если остаток дней >= 16
+
+    Важно: минимально 1 месяц (иначе получаются "нулевые" суммы и странные UX-сценарии).
+    """
+    now = datetime.utcnow()
+    if not end_date or end_date <= now:
+        return 1
+
+    remaining_days = max(0, (end_date - now).days)
+    full_months, remainder_days = divmod(remaining_days, 30)
+    months = full_months + (1 if remainder_days >= 16 else 0)
+    return max(1, months)
 
 
 async def _run_with_standard_subscription(callback: types.CallbackQuery, db_user: User, db: AsyncSession, handler):
@@ -38,30 +57,25 @@ async def _run_with_standard_subscription(callback: types.CallbackQuery, db_user
         set_committed_value(db_user, "remnawave_uuid", original_uuid)
 
 
-async def _run_with_standard_subscription_monthly_pricing(
+async def _run_with_standard_subscription_devices_pricing(
     callback: types.CallbackQuery,
     db_user: User,
     db: AsyncSession,
     handler,
 ):
     import app.handlers.subscription.devices as devices
+    import app.utils.pricing_utils as pricing_utils
 
-    original_calc = devices.calculate_prorated_price
-    original_remaining = devices.get_remaining_months
+    original_pricing_remaining = pricing_utils.get_remaining_months
+    original_devices_remaining = devices.get_remaining_months
 
-    def _monthly_price(price_per_month, _end_date):
-        return price_per_month, 1
-
-    def _one_month(_end_date):
-        return 1
-
-    devices.calculate_prorated_price = _monthly_price
-    devices.get_remaining_months = _one_month
     try:
+        pricing_utils.get_remaining_months = _get_remaining_months_for_devices
+        devices.get_remaining_months = _get_remaining_months_for_devices
         return await _run_with_standard_subscription(callback, db_user, db, handler)
     finally:
-        devices.calculate_prorated_price = original_calc
-        devices.get_remaining_months = original_remaining
+        pricing_utils.get_remaining_months = original_pricing_remaining
+        devices.get_remaining_months = original_devices_remaining
 
 
 _ORIGINAL_GET_CHANGE_DEVICES_KEYBOARD = inline_kb.get_change_devices_keyboard
@@ -88,7 +102,7 @@ def _patched_get_change_devices_keyboard(
     keyboard = _ORIGINAL_GET_CHANGE_DEVICES_KEYBOARD(
         current_devices,
         language,
-        None,
+        subscription_end_date,
         discount_percent,
     )
     _swap_keyboard_back_callback(keyboard, "menu_subscription")
@@ -114,10 +128,15 @@ def apply_subscription_devices_patches() -> None:
         return
 
     async def handle_change_devices(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
-        return await _run_with_standard_subscription(callback, db_user, db, _ORIGINAL_HANDLE_CHANGE_DEVICES)
+        return await _run_with_standard_subscription_devices_pricing(
+            callback,
+            db_user,
+            db,
+            _ORIGINAL_HANDLE_CHANGE_DEVICES,
+        )
 
     async def confirm_change_devices(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
-        return await _run_with_standard_subscription_monthly_pricing(
+        return await _run_with_standard_subscription_devices_pricing(
             callback,
             db_user,
             db,
@@ -143,7 +162,7 @@ def apply_subscription_devices_patches() -> None:
         return await _run_with_standard_subscription(callback, db_user, db, _ORIGINAL_HANDLE_RESET_DEVICES)
 
     async def execute_change_devices(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
-        return await _run_with_standard_subscription_monthly_pricing(
+        return await _run_with_standard_subscription_devices_pricing(
             callback,
             db_user,
             db,

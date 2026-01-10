@@ -11,6 +11,7 @@ from app.keyboards.inline import get_back_keyboard
 from app.localization.texts import get_texts
 from app.services.subscription_service import SubscriptionService
 from app.spiderman.tariff_context import TariffCode, normalize_tariff_code
+from app.spiderman.menu_media import SLOT_SUBSCRIPTION, edit_or_answer_media
 from app.utils.subscription_utils import get_display_subscription_link
 
 logger = logging.getLogger(__name__)
@@ -334,9 +335,11 @@ async def show_subscription_info(
     primary_subscription = _pick_primary_subscription(subscriptions_by_tariff)
     message = "\n\n".join(blocks)
 
-    await callback.message.edit_text(
-        message,
-        reply_markup=_build_subscription_keyboard(
+    await edit_or_answer_media(
+        callback=callback,
+        slot=SLOT_SUBSCRIPTION,
+        caption=message,
+        keyboard=_build_subscription_keyboard(
             db_user.language,
             standard_subscription=standard_subscription,
             white_subscription=white_subscription,
@@ -344,7 +347,6 @@ async def show_subscription_info(
             hide_subscription_link=hide_subscription_link,
         ),
         parse_mode="HTML",
-        disable_web_page_preview=True,
     )
     await callback.answer()
 

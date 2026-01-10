@@ -81,6 +81,7 @@ async def get_user_by_id(db: AsyncSession, user_id: int) -> Optional[User]:
         select(User)
         .options(
             selectinload(User.subscription),
+            selectinload(User.subscription_white),
             selectinload(User.user_promo_groups).selectinload(UserPromoGroup.promo_group),
             selectinload(User.referrer),
             selectinload(User.promo_group),
@@ -101,6 +102,7 @@ async def get_user_by_telegram_id(db: AsyncSession, telegram_id: int) -> Optiona
         select(User)
         .options(
             selectinload(User.subscription),
+            selectinload(User.subscription_white),
             selectinload(User.user_promo_groups).selectinload(UserPromoGroup.promo_group),
             selectinload(User.referrer),
             selectinload(User.promo_group),
@@ -126,6 +128,7 @@ async def get_user_by_username(db: AsyncSession, username: str) -> Optional[User
         select(User)
         .options(
             selectinload(User.subscription),
+            selectinload(User.subscription_white),
             selectinload(User.user_promo_groups).selectinload(UserPromoGroup.promo_group),
             selectinload(User.referrer),
             selectinload(User.promo_group),
@@ -147,6 +150,7 @@ async def get_user_by_referral_code(db: AsyncSession, referral_code: str) -> Opt
         select(User)
         .options(
             selectinload(User.subscription),
+            selectinload(User.subscription_white),
             selectinload(User.promo_group),
             selectinload(User.referrer),
         )
@@ -166,6 +170,7 @@ async def get_user_by_remnawave_uuid(db: AsyncSession, remnawave_uuid: str) -> O
         select(User)
         .options(
             selectinload(User.subscription),
+            selectinload(User.subscription_white),
             selectinload(User.promo_group),
             selectinload(User.referrer),
         )

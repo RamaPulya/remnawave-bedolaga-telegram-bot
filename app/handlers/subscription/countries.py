@@ -394,7 +394,7 @@ async def apply_countries_changes(
             missing=texts.format_price(missing_kopeks),
         )
 
-        await callback.message.answer(
+        await callback.message.edit_text(
             message_text,
             reply_markup=get_insufficient_balance_keyboard(
                 db_user.language,

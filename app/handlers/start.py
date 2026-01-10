@@ -28,6 +28,7 @@ from app.keyboards.inline import (
     get_post_registration_keyboard,
     get_language_selection_keyboard,
 )
+from app.keyboards.reply import get_reply_main_menu_keyboard
 from app.localization.loader import DEFAULT_LANGUAGE
 from app.localization.texts import get_texts, get_rules, get_privacy_policy
 from app.services.referral_service import process_referral_registration
@@ -37,6 +38,7 @@ from app.services.subscription_service import SubscriptionService
 from app.services.support_settings_service import SupportSettingsService
 from app.services.main_menu_button_service import MainMenuButtonService
 from app.services.privacy_policy_service import PrivacyPolicyService
+from app.spiderman.menu_media import SLOT_MAIN_MENU, answer_media
 from app.services.pinned_message_service import (
     deliver_pinned_message_to_user,
     get_active_pinned_message,
@@ -53,16 +55,71 @@ from app.services.blacklist_service import blacklist_service
 
 
 logger = logging.getLogger(__name__)
+_SUBSCRIPTION_REFRESH_ATTRS = (
+    ["subscription", "subscription_white"]
+    if settings.MULTI_TARIFF_ENABLED
+    else ["subscription"]
+)
 
 
-def _calculate_subscription_flags(subscription):
-    if not subscription:
+async def _ensure_reply_main_menu_button(message: types.Message, db: AsyncSession, user) -> None:
+    settings_dict = dict(getattr(user, "notification_settings", None) or {})
+    if settings_dict.get("reply_main_menu_keyboard_set"):
+        return
+
+    try:
+        await message.bot.send_message(
+            chat_id=message.chat.id,
+            text="\u2063",
+            reply_markup=get_reply_main_menu_keyboard(user.language),
+            disable_notification=True,
+        )
+        settings_dict["reply_main_menu_keyboard_set"] = True
+        user.notification_settings = settings_dict
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        return
+
+
+async def handle_reply_main_menu(
+    message: types.Message,
+    state: FSMContext,
+    db: AsyncSession,
+    db_user=None,
+):
+    text = (message.text or "").strip()
+    if text not in {"🕷 Главное меню", "🕷 Main menu"}:
+        return
+    await cmd_start(message, state, db, db_user=db_user)
+
+
+def _calculate_subscription_flags(user):
+    if not user:
         return False, False
 
-    actual_status = getattr(subscription, "actual_status", None)
-    has_active_subscription = actual_status in {"active", "trial"}
-    subscription_is_active = bool(getattr(subscription, "is_active", False))
+    subscriptions = []
+    # В async SQLAlchemy lazy-load relationships может падать MissingGreenlet.
+    # Берём только уже загруженные значения (или явно установленные) без запроса в БД.
+    standard = getattr(user, "__dict__", {}).get("subscription")
+    if standard:
+        subscriptions.append(standard)
 
+    if settings.MULTI_TARIFF_ENABLED:
+        white = getattr(user, "__dict__", {}).get("subscription_white")
+        if white:
+            subscriptions.append(white)
+
+    if not subscriptions:
+        return False, False
+
+    has_active_subscription = any(
+        getattr(subscription, "actual_status", None) in {"active", "trial"}
+        for subscription in subscriptions
+    )
+    subscription_is_active = any(
+        bool(getattr(subscription, "is_active", False))
+        for subscription in subscriptions
+    )
     return has_active_subscription, subscription_is_active
 
 
@@ -311,10 +368,16 @@ async def cmd_start(message: types.Message, state: FSMContext, db: AsyncSession,
 
     referral_code = None
     campaign = None
-    start_args = message.text.split()
+    raw_text = (message.text or "").strip()
+    start_args = raw_text.split() if raw_text else []
     start_parameter = None
 
-    if len(start_args) > 1:
+    is_start_command = False
+    if start_args:
+        first_token = start_args[0].split("@", 1)[0]
+        is_start_command = first_token == "/start"
+
+    if is_start_command and len(start_args) > 1:
         start_parameter = start_args[1]
     elif pending_start_payload:
         start_parameter = pending_start_payload
@@ -421,9 +484,7 @@ async def cmd_start(message: types.Message, state: FSMContext, db: AsyncSession,
                     f"Ошибка отправки уведомления о рекламной кампании: {e}"
                 )
 
-        has_active_subscription, subscription_is_active = _calculate_subscription_flags(
-            user.subscription
-        )
+        has_active_subscription, subscription_is_active = _calculate_subscription_flags(user)
 
         pinned_message = await get_active_pinned_message(db)
 
@@ -459,10 +520,13 @@ async def cmd_start(message: types.Message, state: FSMContext, db: AsyncSession,
             is_moderator=is_moderator,
             custom_buttons=custom_buttons,
         )
-        await message.answer(
-            menu_text,
-            reply_markup=keyboard,
-            parse_mode="HTML"
+        await _ensure_reply_main_menu_button(message, db, user)
+        await answer_media(
+            message,
+            slot=SLOT_MAIN_MENU,
+            caption=menu_text,
+            keyboard=keyboard,
+            parse_mode="HTML",
         )
 
         if pinned_message and not pinned_message.send_before_menu:
@@ -1081,11 +1145,9 @@ async def complete_registration_from_callback(
                 )
             )
 
-        await db.refresh(existing_user, ['subscription'])
+        await db.refresh(existing_user, _SUBSCRIPTION_REFRESH_ATTRS)
 
-        has_active_subscription, subscription_is_active = _calculate_subscription_flags(
-            existing_user.subscription
-        )
+        has_active_subscription, subscription_is_active = _calculate_subscription_flags(existing_user)
 
         menu_text = await get_main_menu_text(existing_user, texts, db)
 
@@ -1118,10 +1180,12 @@ async def complete_registration_from_callback(
                 is_moderator=is_moderator,
                 custom_buttons=custom_buttons,
             )
-            await callback.message.answer(
-                menu_text,
-                reply_markup=keyboard,
-                parse_mode="HTML"
+            await answer_media(
+                callback.message,
+                slot=SLOT_MAIN_MENU,
+                caption=menu_text,
+                keyboard=keyboard,
+                parse_mode="HTML",
             )
             await _send_pinned_message(callback.bot, db, existing_user)
         except Exception as e:
@@ -1172,7 +1236,7 @@ async def complete_registration_from_callback(
         existing_user.last_activity = datetime.utcnow()
 
         await db.commit()
-        await db.refresh(existing_user, ['subscription'])
+        await db.refresh(existing_user, _SUBSCRIPTION_REFRESH_ATTRS)
 
         user = existing_user
         logger.info(f"✅ Пользователь {callback.from_user.id} восстановлен")
@@ -1192,7 +1256,7 @@ async def complete_registration_from_callback(
             referred_by_id=referrer_id,
             referral_code=referral_code
         )
-        await db.refresh(user, ['subscription'])
+        await db.refresh(user, _SUBSCRIPTION_REFRESH_ATTRS)
     else:
         logger.info(f"🔄 Обновляем существующего пользователя {callback.from_user.id}")
         existing_user.status = UserStatus.ACTIVE.value
@@ -1205,7 +1269,7 @@ async def complete_registration_from_callback(
         existing_user.last_activity = datetime.utcnow()
 
         await db.commit()
-        await db.refresh(existing_user, ['subscription'])
+        await db.refresh(existing_user, _SUBSCRIPTION_REFRESH_ATTRS)
         user = existing_user
 
     if referrer_id:
@@ -1268,9 +1332,7 @@ async def complete_registration_from_callback(
     else:
         logger.info(f"ℹ️ Приветственные сообщения отключены, показываем главное меню для пользователя {user.telegram_id}")
 
-        has_active_subscription, subscription_is_active = _calculate_subscription_flags(
-            getattr(user, "subscription", None)
-        )
+        has_active_subscription, subscription_is_active = _calculate_subscription_flags(user)
 
         menu_text = await get_main_menu_text(user, texts, db)
 
@@ -1303,10 +1365,12 @@ async def complete_registration_from_callback(
                 is_moderator=is_moderator,
                 custom_buttons=custom_buttons,
             )
-            await callback.message.answer(
-                menu_text,
-                reply_markup=keyboard,
-                parse_mode="HTML"
+            await answer_media(
+                callback.message,
+                slot=SLOT_MAIN_MENU,
+                caption=menu_text,
+                keyboard=keyboard,
+                parse_mode="HTML",
             )
             await _send_pinned_message(callback.bot, db, user)
             logger.info(f"✅ Главное меню показано пользователю {user.telegram_id}")
@@ -1364,11 +1428,9 @@ async def complete_registration(
                 )
             )
 
-        await db.refresh(existing_user, ['subscription'])
+        await db.refresh(existing_user, _SUBSCRIPTION_REFRESH_ATTRS)
 
-        has_active_subscription, subscription_is_active = _calculate_subscription_flags(
-            existing_user.subscription
-        )
+        has_active_subscription, subscription_is_active = _calculate_subscription_flags(existing_user)
 
         menu_text = await get_main_menu_text(existing_user, texts, db)
 
@@ -1401,10 +1463,12 @@ async def complete_registration(
                 is_moderator=is_moderator,
                 custom_buttons=custom_buttons,
             )
-            await message.answer(
-                menu_text,
-                reply_markup=keyboard,
-                parse_mode="HTML"
+            await answer_media(
+                message,
+                slot=SLOT_MAIN_MENU,
+                caption=menu_text,
+                keyboard=keyboard,
+                parse_mode="HTML",
             )
             await _send_pinned_message(message.bot, db, existing_user)
         except Exception as e:
@@ -1455,7 +1519,7 @@ async def complete_registration(
         existing_user.last_activity = datetime.utcnow()
 
         await db.commit()
-        await db.refresh(existing_user, ['subscription'])
+        await db.refresh(existing_user, _SUBSCRIPTION_REFRESH_ATTRS)
 
         user = existing_user
         logger.info(f"✅ Пользователь {message.from_user.id} восстановлен")
@@ -1475,7 +1539,7 @@ async def complete_registration(
             referred_by_id=referrer_id,
             referral_code=referral_code
         )
-        await db.refresh(user, ['subscription'])
+        await db.refresh(user, _SUBSCRIPTION_REFRESH_ATTRS)
     else:
         logger.info(f"🔄 Обновляем существующего пользователя {message.from_user.id}")
         existing_user.status = UserStatus.ACTIVE.value
@@ -1488,7 +1552,7 @@ async def complete_registration(
         existing_user.last_activity = datetime.utcnow()
 
         await db.commit()
-        await db.refresh(existing_user, ['subscription'])
+        await db.refresh(existing_user, _SUBSCRIPTION_REFRESH_ATTRS)
         user = existing_user
 
     if referrer_id:
@@ -1574,9 +1638,7 @@ async def complete_registration(
     else:
         logger.info(f"ℹ️ Приветственные сообщения отключены, показываем главное меню для пользователя {user.telegram_id}")
 
-        has_active_subscription, subscription_is_active = _calculate_subscription_flags(
-            getattr(user, "subscription", None)
-        )
+        has_active_subscription, subscription_is_active = _calculate_subscription_flags(user)
 
         menu_text = await get_main_menu_text(user, texts, db)
 
@@ -1609,10 +1671,12 @@ async def complete_registration(
                 is_moderator=is_moderator,
                 custom_buttons=custom_buttons,
             )
-            await message.answer(
-                menu_text,
-                reply_markup=keyboard,
-                parse_mode="HTML"
+            await answer_media(
+                message,
+                slot=SLOT_MAIN_MENU,
+                caption=menu_text,
+                keyboard=keyboard,
+                parse_mode="HTML",
             )
             logger.info(f"✅ Главное меню показано пользователю {user.telegram_id}")
             await _send_pinned_message(message.bot, db, user)
@@ -1719,6 +1783,85 @@ def _insert_random_message(base_text: str, random_message: str, action_prompt: s
     return f"{base_text}\n\n{random_message}"
 
 
+def _is_subscription_active(subscription) -> bool:
+    if subscription is None:
+        return False
+    actual_status = (getattr(subscription, "actual_status", "") or "").lower()
+    if actual_status not in {"active", "trial"}:
+        return False
+    end_date = getattr(subscription, "end_date", None)
+    if not end_date:
+        return False
+    return end_date > datetime.utcnow()
+
+
+def _is_trial_subscription(subscription) -> bool:
+    if subscription is None:
+        return False
+
+    if bool(getattr(subscription, "is_trial", False)):
+        return True
+
+    actual_status = (getattr(subscription, "actual_status", "") or "").lower()
+    if actual_status == "trial":
+        return True
+
+    status = (getattr(subscription, "status", "") or "").lower()
+    if status == "trial":
+        return True
+
+    tags = getattr(subscription, "tags", None)
+    if isinstance(tags, (list, tuple, set)):
+        return any(str(tag).upper() == "TRIAL" for tag in tags)
+    if isinstance(tags, str) and "TRIAL" in tags.upper():
+        return True
+
+    tag = getattr(subscription, "tag", None)
+    if isinstance(tag, str) and tag.upper() == "TRIAL":
+        return True
+
+    return False
+
+
+def _format_main_menu_tariff_block(
+    *,
+    prefix_emoji: str,
+    tariff_display: str,
+    subscription,
+    include_end_date: bool,
+    include_traffic: bool,
+) -> str:
+    if not _is_subscription_active(subscription):
+        lines = [
+            f"{prefix_emoji} Подписка: отсутствует",
+            f"📦 Тариф: {tariff_display}",
+        ]
+        return "\n".join(lines)
+
+    lines = [
+        f"{prefix_emoji} Подписка: 💎 Активна",
+        f"📦 Тариф: {tariff_display}",
+    ]
+
+    if include_end_date:
+        end_date = getattr(subscription, "end_date", None)
+        if end_date:
+            date_text = format_local_datetime(end_date, "%d.%m.%Y")
+            days_left = max(0, int((end_date - datetime.utcnow()).days))
+            lines.append(f"📅 до {date_text} ({days_left} дн.)")
+
+    if include_traffic:
+        traffic_limit = float(getattr(subscription, "traffic_limit_gb", 0) or 0)
+        traffic_used = float(getattr(subscription, "traffic_used_gb", 0.0) or 0.0)
+        if traffic_limit <= 0:
+            lines.append("📊 Трафик: безлимит")
+        else:
+            remaining = max(0.0, traffic_limit - traffic_used)
+            lines.append(f"📊 Трафик: {remaining:.2f} Гб")
+
+    return "\n".join(lines)
+
+
 def get_referral_code_keyboard(language: str):
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -1731,14 +1874,67 @@ def get_referral_code_keyboard(language: str):
     ])
 
 async def get_main_menu_text(user, texts, db: AsyncSession):
-
-    import html
-    base_text = texts.MAIN_MENU.format(
-        user_name=html.escape(user.full_name or ""),
-        subscription_status=_get_subscription_status(user, texts)
-    )
-
     action_prompt = texts.t("MAIN_MENU_ACTION_PROMPT", "Выберите действие:")
+
+    language_code = (getattr(user, "language", None) or settings.DEFAULT_LANGUAGE).split("-")[0].lower()
+    if language_code == "ru" and settings.MULTI_TARIFF_ENABLED:
+        import html
+
+        try:
+            from app.database.crud.subscription import get_subscription_by_user_id_and_tariff
+            from app.spiderman.tariff_context import TariffCode
+
+            standard_subscription = await get_subscription_by_user_id_and_tariff(
+                db, user.id, TariffCode.STANDARD.value
+            )
+            white_subscription = await get_subscription_by_user_id_and_tariff(
+                db, user.id, TariffCode.WHITE.value
+            )
+        except Exception as exc:
+            logger.error(
+                "Ошибка загрузки подписок (multi-tariff) для пользователя %s: %s",
+                user.id,
+                exc,
+            )
+            standard_subscription = getattr(user, "__dict__", {}).get("subscription")
+            white_subscription = None
+
+        user_name = html.escape(getattr(user, "full_name", "") or "")
+
+        standard_tariff_display = (
+            "🧪 Тестовая подписка"
+            if _is_trial_subscription(standard_subscription)
+            else "🕷 Питер Паркер"
+        )
+
+        base_text = (
+            f"<b>👤 {user_name}</b>\n\n"
+            + _format_main_menu_tariff_block(
+                prefix_emoji="🛜",
+                tariff_display=standard_tariff_display,
+                subscription=standard_subscription,
+                include_end_date=True,
+                include_traffic=False,
+            )
+            + "\n\n"
+            + _format_main_menu_tariff_block(
+                prefix_emoji="📶",
+                tariff_display="⚪️ Саша Белый",
+                subscription=white_subscription,
+                include_end_date=False,
+                include_traffic=True,
+            )
+            + "\n\n"
+            + action_prompt
+            + "\n"
+        )
+    else:
+        import html
+
+        base_text = texts.MAIN_MENU.format(
+            user_name=f"<b>{html.escape(user.full_name or '')}</b>",
+            subscription_status=_get_subscription_status(user, texts),
+        )
 
     info_sections: list[str] = []
 
@@ -1909,14 +2105,9 @@ async def required_sub_channel_check(
             logger.warning(f"Не удалось удалить сообщение: {e}")
 
         if user and user.status != UserStatus.DELETED.value:
-            has_active_subscription, subscription_is_active = _calculate_subscription_flags(
-                user.subscription
-            )
+            has_active_subscription, subscription_is_active = _calculate_subscription_flags(user)
 
             menu_text = await get_main_menu_text(user, texts, db)
-
-            from app.utils.message_patch import LOGO_PATH
-            from aiogram.types import FSInputFile
 
             is_admin = settings.is_admin(user.telegram_id)
             is_moderator = (
@@ -1945,12 +2136,12 @@ async def required_sub_channel_check(
                 custom_buttons=custom_buttons,
             )
 
-            if settings.ENABLE_LOGO_MODE:
-                await bot.send_photo(
-                    chat_id=query.from_user.id,
-                    photo=FSInputFile(LOGO_PATH),
+            if query.message:
+                await answer_media(
+                    query.message,
+                    slot=SLOT_MAIN_MENU,
                     caption=menu_text,
-                    reply_markup=keyboard,
+                    keyboard=keyboard,
                     parse_mode="HTML",
                 )
             else:
@@ -1983,10 +2174,56 @@ async def required_sub_channel_check(
                         referral_code=referral_code,
                     )
 
-                    await bot.send_message(
-                        chat_id=query.from_user.id,
-                        text=texts.t("WELCOME_FALLBACK", "Добро пожаловать, {user_name}!").format(user_name=user.full_name),
+                    await db.refresh(user, ["subscription"])
+
+                    # Показываем главное меню после создания пользователя
+                    has_active_subscription, subscription_is_active = _calculate_subscription_flags(user)
+
+                    menu_text = await get_main_menu_text(user, texts, db)
+
+                    is_admin = settings.is_admin(user.telegram_id)
+                    is_moderator = (
+                        (not is_admin)
+                        and SupportSettingsService.is_moderator(user.telegram_id)
                     )
+
+                    custom_buttons = await MainMenuButtonService.get_buttons_for_user(
+                        db,
+                        is_admin=is_admin,
+                        has_active_subscription=has_active_subscription,
+                        subscription_is_active=subscription_is_active,
+                    )
+
+                    keyboard = await get_main_menu_keyboard_async(
+                        db=db,
+                        user=user,
+                        language=user.language,
+                        is_admin=is_admin,
+                        has_had_paid_subscription=user.has_had_paid_subscription,
+                        has_active_subscription=has_active_subscription,
+                        subscription_is_active=subscription_is_active,
+                        balance_kopeks=user.balance_kopeks,
+                        subscription=user.subscription,
+                        is_moderator=is_moderator,
+                        custom_buttons=custom_buttons,
+                    )
+
+                    if query.message:
+                        await answer_media(
+                            query.message,
+                            slot=SLOT_MAIN_MENU,
+                            caption=menu_text,
+                            keyboard=keyboard,
+                            parse_mode="HTML",
+                        )
+                    else:
+                        await bot.send_message(
+                            chat_id=query.from_user.id,
+                            text=menu_text,
+                            reply_markup=keyboard,
+                            parse_mode="HTML",
+                        )
+                    await _send_pinned_message(bot, db, user)
                 else:
                     await bot.send_message(
                         chat_id=query.from_user.id,
@@ -2025,6 +2262,12 @@ async def required_sub_channel_check(
 def register_handlers(dp: Dispatcher):
 
     logger.info("🔧 === НАЧАЛО регистрации обработчиков start.py ===")
+
+    dp.message.register(
+        handle_reply_main_menu,
+        F.text.in_(["🕷 Главное меню", "🕷 Main menu"]),
+    )
+    logger.info("✅ Зарегистрирован handle_reply_main_menu")
 
     dp.message.register(
         cmd_start,

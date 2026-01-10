@@ -4,6 +4,7 @@ import logging
 from typing import List
 
 from aiogram import types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -341,32 +342,87 @@ async def process_platega_payment_amount(
 
     state_data = await state.get_data()
     prompt_message_id = state_data.get("platega_prompt_message_id")
-    prompt_chat_id = state_data.get("platega_prompt_chat_id", message.chat.id)
+    prompt_chat_id = state_data.get("platega_prompt_chat_id")
+
+    # В некоторых флоу (например, когда сумма приходит из корзины/быстрого выбора)
+    # экран ввода суммы не показывается, и prompt_message_id не успевает сохраниться.
+    # В этом случае считаем текущий экран "промптом" и редактируем его, а не удаляем/создаём новый.
+    if not prompt_message_id:
+        prompt_message_id = message.message_id
+        prompt_chat_id = message.chat.id
+        await state.update_data(
+            platega_prompt_message_id=prompt_message_id,
+            platega_prompt_chat_id=prompt_chat_id,
+        )
+
+    if not prompt_chat_id:
+        prompt_chat_id = message.chat.id
 
     try:
-        await message.delete()
+        is_prompt_message = (
+            prompt_message_id
+            and int(prompt_message_id) == int(message.message_id)
+            and int(prompt_chat_id) == int(message.chat.id)
+        )
+        if not is_prompt_message:
+            await message.delete()
     except Exception as delete_error:  # pragma: no cover - зависит от прав бота
         logger.warning("Не удалось удалить сообщение с суммой Platega: %s", delete_error)
 
-    if prompt_message_id:
-        try:
-            await message.bot.delete_message(prompt_chat_id, prompt_message_id)
-        except Exception as delete_error:  # pragma: no cover - диагностический лог
-            logger.warning(
-                "Не удалось удалить сообщение с запросом суммы Platega: %s",
-                delete_error,
-            )
-
-    invoice_message = await message.answer(
-        instructions_template.format(
-            method=method_title,
-            amount=settings.format_price(amount_kopeks),
-            transaction=transaction_id or local_payment_id,
-            support=settings.get_support_contact_display_html(),
-        ),
-        reply_markup=keyboard,
-        parse_mode="HTML",
+    invoice_text = instructions_template.format(
+        method=method_title,
+        amount=settings.format_price(amount_kopeks),
+        transaction=transaction_id or local_payment_id,
+        support=settings.get_support_contact_display_html(),
     )
+
+    invoice_chat_id = message.chat.id
+    invoice_message_id: int | None = None
+
+    # Пробуем отредактировать текущий экран (caption или text), чтобы UI оставался "плавным".
+    if prompt_message_id:
+        invoice_chat_id = prompt_chat_id
+        try:
+            await message.bot.edit_message_caption(
+                chat_id=prompt_chat_id,
+                message_id=prompt_message_id,
+                caption=invoice_text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+            invoice_message_id = int(prompt_message_id)
+        except TelegramBadRequest:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=prompt_chat_id,
+                    message_id=prompt_message_id,
+                    text=invoice_text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                )
+                invoice_message_id = int(prompt_message_id)
+            except TelegramBadRequest:
+                invoice_message_id = None
+
+    # Fallback: если не получилось отредактировать текущий экран - отправляем новое сообщение.
+    if invoice_message_id is None:
+        if prompt_message_id:
+            try:
+                await message.bot.delete_message(prompt_chat_id, prompt_message_id)
+            except Exception as delete_error:
+                logger.warning(
+                    "❌ Не удалось удалить промпт-сообщение Platega перед отправкой нового: %s",
+                    delete_error,
+                )
+
+        invoice_message = await message.answer(
+            invoice_text,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+        invoice_chat_id = invoice_message.chat.id
+        invoice_message_id = invoice_message.message_id
+
 
     try:
         from app.services import payment_service as payment_module
@@ -375,8 +431,8 @@ async def process_platega_payment_amount(
         if payment:
             payment_metadata = dict(getattr(payment, "metadata_json", {}) or {})
             payment_metadata["invoice_message"] = {
-                "chat_id": invoice_message.chat.id,
-                "message_id": invoice_message.message_id,
+                "chat_id": invoice_chat_id,
+                "message_id": invoice_message_id,
             }
             await payment_module.update_platega_payment(
                 db,
@@ -387,8 +443,8 @@ async def process_platega_payment_amount(
         logger.warning("Не удалось сохранить данные сообщения Platega: %s", error)
 
     await state.update_data(
-        platega_invoice_message_id=invoice_message.message_id,
-        platega_invoice_chat_id=invoice_message.chat.id,
+        platega_invoice_message_id=invoice_message_id,
+        platega_invoice_chat_id=invoice_chat_id,
     )
 
     await state.clear()

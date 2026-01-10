@@ -178,7 +178,11 @@ from .happ import (
     handle_happ_download_platform_choice,
     handle_happ_download_request,
 )
-from .links import handle_connect_subscription, handle_open_subscription_link
+from .links import (
+    handle_connect_subscription,
+    handle_open_subscription_link,
+    handle_open_subscription_link_white,
+)
 from .pricing import _build_subscription_period_prompt, _prepare_subscription_summary
 from .promo import (
     _build_promo_group_discount_text,
@@ -883,12 +887,13 @@ async def activate_trial(
             trial_success_text += payment_note
 
             connect_mode = settings.CONNECT_BUTTON_MODE
+            connect_button_text = f"{texts.t('CONNECT_BUTTON', '🔗 Подключиться')} 🕷"
 
             if connect_mode == "miniapp_subscription":
                 connect_keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                            text=connect_button_text,
                             web_app=types.WebAppInfo(url=subscription_link),
                         )
                     ],
@@ -913,7 +918,7 @@ async def activate_trial(
                 connect_keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                            text=connect_button_text,
                             web_app=types.WebAppInfo(url=settings.MINIAPP_CUSTOM_URL),
                         )
                     ],
@@ -928,7 +933,7 @@ async def activate_trial(
                 rows = [
                     [
                         InlineKeyboardButton(
-                            text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                            text=connect_button_text,
                             url=subscription_link,
                         )
                     ]
@@ -949,7 +954,7 @@ async def activate_trial(
                 rows = [
                     [
                         InlineKeyboardButton(
-                            text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                            text=connect_button_text,
                             callback_data="open_subscription_link",
                         )
                     ]
@@ -971,7 +976,7 @@ async def activate_trial(
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                                text=connect_button_text,
                                 callback_data="subscription_connect",
                             )
                         ],
@@ -2649,13 +2654,23 @@ async def confirm_purchase(
             if discount_note:
                 success_text = f"{success_text}\n\n{discount_note}"
 
+            tariff_code = (getattr(subscription, "tariff_code", None) or "standard").lower()
+            is_white_tariff = tariff_code == "white"
+            connect_button_suffix = " ⚪️" if is_white_tariff else " 🕷"
+            connect_button_text = (
+                f"{texts.t('CONNECT_BUTTON', '🔗 Подключиться')}{connect_button_suffix}"
+            )
+            happ_callback = (
+                "open_subscription_link_white" if is_white_tariff else "open_subscription_link"
+            )
+
             connect_mode = settings.CONNECT_BUTTON_MODE
 
             if connect_mode == "miniapp_subscription":
                 connect_keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                            text=connect_button_text,
                             web_app=types.WebAppInfo(url=subscription_link),
                         )
                     ],
@@ -2676,7 +2691,7 @@ async def confirm_purchase(
                 connect_keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                            text=connect_button_text,
                             web_app=types.WebAppInfo(url=settings.MINIAPP_CUSTOM_URL),
                         )
                     ],
@@ -2685,7 +2700,7 @@ async def confirm_purchase(
                 ])
             elif connect_mode == "link":
                 rows = [
-                    [InlineKeyboardButton(text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"), url=subscription_link)]
+                    [InlineKeyboardButton(text=connect_button_text, url=subscription_link)]
                 ]
                 happ_row = get_happ_download_button_row(texts)
                 if happ_row:
@@ -2697,8 +2712,8 @@ async def confirm_purchase(
                 rows = [
                     [
                         InlineKeyboardButton(
-                            text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
-                            callback_data="open_subscription_link",
+                            text=connect_button_text,
+                            callback_data=happ_callback,
                         )
                     ]
                 ]
@@ -2710,7 +2725,7 @@ async def confirm_purchase(
                 connect_keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
             else:
                 connect_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                    [InlineKeyboardButton(text=connect_button_text,
                                           callback_data="subscription_connect")],
                     [InlineKeyboardButton(text=texts.t("BACK_TO_MAIN_MENU_BUTTON", "⬅️ В главное меню"),
                                           callback_data="back_to_menu")],
@@ -3147,12 +3162,13 @@ async def handle_trial_pay_with_balance(
 
 def _build_trial_success_keyboard(texts, subscription_link: str, connect_mode: str) -> InlineKeyboardMarkup:
     """Создает клавиатуру успешной активации триала."""
+    connect_button_text = f"{texts.t('CONNECT_BUTTON', '🔗 Подключиться')} 🕷"
 
     if connect_mode == "miniapp_subscription":
         return InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                    text=connect_button_text,
                     web_app=types.WebAppInfo(url=subscription_link),
                 )
             ],
@@ -3170,7 +3186,7 @@ def _build_trial_success_keyboard(texts, subscription_link: str, connect_mode: s
         return InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                    text=connect_button_text,
                     web_app=types.WebAppInfo(url=settings.MINIAPP_CUSTOM_URL),
                 )
             ],
@@ -3185,7 +3201,7 @@ def _build_trial_success_keyboard(texts, subscription_link: str, connect_mode: s
         rows = [
             [
                 InlineKeyboardButton(
-                    text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                    text=connect_button_text,
                     url=subscription_link,
                 )
             ]
@@ -3206,7 +3222,7 @@ def _build_trial_success_keyboard(texts, subscription_link: str, connect_mode: s
         rows = [
             [
                 InlineKeyboardButton(
-                    text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                    text=connect_button_text,
                     callback_data="open_subscription_link",
                 )
             ]
@@ -3228,7 +3244,7 @@ def _build_trial_success_keyboard(texts, subscription_link: str, connect_mode: s
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text=texts.t("CONNECT_BUTTON", "🔗 Подключиться"),
+                        text=connect_button_text,
                         callback_data="subscription_connect",
                     )
                 ],
@@ -3859,6 +3875,11 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(
         handle_open_subscription_link,
         F.data == "open_subscription_link"
+    )
+
+    dp.callback_query.register(
+        handle_open_subscription_link_white,
+        F.data == "open_subscription_link_white"
     )
 
     dp.callback_query.register(

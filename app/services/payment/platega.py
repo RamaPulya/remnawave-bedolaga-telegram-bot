@@ -500,11 +500,26 @@ class PlategaPaymentMixin:
                 from app.localization.texts import get_texts
 
                 texts = get_texts(user.language)
+                total_amount = "—"
+                try:
+                    cart_data = await user_cart_service.get_user_cart(user.id)
+                    if cart_data:
+                        total_amount_kopeks = int(
+                            cart_data.get("total_price")
+                            or cart_data.get("final_price")
+                            or cart_data.get("price")
+                            or 0
+                        )
+                        if total_amount_kopeks > 0:
+                            total_amount = settings.format_price(total_amount_kopeks)
+                except Exception:
+                    pass
+
                 cart_message = texts.t(
                     "BALANCE_TOPUP_CART_REMINDER_DETAILED",
                     "🛒 У вас есть неоформленный заказ.\n\n"
                     "Вы можете продолжить оформление с теми же параметрами.",
-                )
+                ).format(total_amount=total_amount)
 
                 keyboard = types.InlineKeyboardMarkup(
                     inline_keyboard=[

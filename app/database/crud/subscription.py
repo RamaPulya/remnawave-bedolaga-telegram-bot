@@ -38,6 +38,34 @@ async def get_subscription_by_user_id(db: AsyncSession, user_id: int) -> Optiona
     return subscription
 
 
+async def get_subscription_by_user_id_and_tariff(
+    db: AsyncSession,
+    user_id: int,
+    tariff_code: str,
+) -> Optional[Subscription]:
+    result = await db.execute(
+        select(Subscription)
+        .options(selectinload(Subscription.user))
+        .where(
+            and_(
+                Subscription.user_id == user_id,
+                Subscription.tariff_code == tariff_code,
+            )
+        )
+        .limit(1)
+    )
+    subscription = result.scalar_one_or_none()
+
+    if subscription:
+        logger.info(
+            f"🔍 Загружена подписка {subscription.id} ({subscription.tariff_code}) "
+            f"для пользователя {user_id}, статус: {subscription.status}"
+        )
+        subscription = await check_and_update_subscription_status(db, subscription)
+
+    return subscription
+
+
 async def create_trial_subscription(
     db: AsyncSession,
     user_id: int,

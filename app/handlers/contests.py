@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.crud.contest import get_active_rounds, get_attempt
-from app.database.crud.subscription import get_subscription_by_user_id
+from app.database.crud.subscription import get_subscription_by_user_id_and_tariff
 from app.database.database import AsyncSessionLocal
 from app.database.models import ContestRound, SubscriptionStatus
 from app.keyboards.inline import get_back_keyboard
@@ -18,6 +18,7 @@ from app.localization.texts import get_texts
 from app.services.contests import (
     ContestAttemptService,
     GameType,
+    PrizeType,
     get_game_strategy,
 )
 from app.states import ContestStates
@@ -67,20 +68,44 @@ def _validate_callback_data(data: str) -> Optional[list]:
 
 
 def _user_allowed(subscription) -> bool:
-    """Check if user has active or trial subscription."""
+    """Backward-compatible subscription eligibility check."""
     if not subscription:
         return False
-    return subscription.status in {
-        SubscriptionStatus.ACTIVE.value,
-        SubscriptionStatus.TRIAL.value,
-    }
+    now = datetime.utcnow()
+    end_date = getattr(subscription, "end_date", None)
+    if end_date and end_date <= now:
+        return False
+    return subscription.status in {SubscriptionStatus.ACTIVE.value, SubscriptionStatus.TRIAL.value}
 
 
-async def _reply_not_eligible(callback: types.CallbackQuery, language: str):
-    """Reply that user is not eligible to play."""
+def _is_white_prize(prize_type: Optional[str]) -> bool:
+    return (prize_type or PrizeType.DAYS.value) == PrizeType.TRAFFIC_GB.value
+
+
+async def _reply_not_eligible_for_template(
+    callback: types.CallbackQuery,
+    *,
+    language: str,
+    prize_type: Optional[str],
+):
+    """Reply that user is not eligible to play this contest by tariff."""
     texts = get_texts(language)
+    if _is_white_prize(prize_type):
+        await callback.answer(
+            texts.t(
+                "CONTEST_REQUIRES_WHITE",
+                "⚪️ Эта игра с призом в гигабайтах.\n"
+                "Чтобы играть в такие игры, нужно приобрести тариф ⚪️White (Саша Белый).",
+            ),
+            show_alert=True,
+        )
+        return
     await callback.answer(
-        texts.t("CONTEST_NOT_ELIGIBLE", "Игры доступны только с активной или триальной подпиской."),
+        texts.t(
+            "CONTEST_REQUIRES_STANDARD",
+            "🕷️ Эта игра с призом в днях подписки.\n"
+            "Чтобы играть в такие игры, нужно приобрести тариф 🕷️ Standard (Питер Паркер).",
+        ),
         show_alert=True,
     )
 
@@ -94,11 +119,6 @@ async def show_contests_menu(callback: types.CallbackQuery, db_user, db: AsyncSe
     """Show menu with available contest games."""
     texts = get_texts(db_user.language)
 
-    subscription = await get_subscription_by_user_id(db, db_user.id)
-    if not _user_allowed(subscription):
-        await _reply_not_eligible(callback, db_user.language)
-        return
-
     active_rounds = await get_active_rounds(db)
 
     # Group by template, take one round per template
@@ -107,7 +127,11 @@ async def show_contests_menu(callback: types.CallbackQuery, db_user, db: AsyncSe
         if not rnd.template or not rnd.template.is_enabled:
             continue
         tpl_slug = rnd.template.slug if rnd.template else ""
-        if tpl_slug not in unique_templates:
+        existing = unique_templates.get(tpl_slug)
+        if not existing:
+            unique_templates[tpl_slug] = rnd
+            continue
+        if (rnd.starts_at or datetime.min) > (existing.starts_at or datetime.min):
             unique_templates[tpl_slug] = rnd
 
     buttons = []
@@ -144,11 +168,6 @@ async def show_contests_menu(callback: types.CallbackQuery, db_user, db: AsyncSe
 async def play_contest(callback: types.CallbackQuery, state: FSMContext, db_user, db: AsyncSession):
     """Start playing a specific contest."""
     texts = get_texts(db_user.language)
-
-    subscription = await get_subscription_by_user_id(db, db_user.id)
-    if not _user_allowed(subscription):
-        await _reply_not_eligible(callback, db_user.language)
-        return
 
     # Rate limit check
     if not _check_rate_limit(db_user.id, "contest_play", limit=2, window_seconds=10):
@@ -187,6 +206,16 @@ async def play_contest(callback: types.CallbackQuery, state: FSMContext, db_user
             await callback.answer(
                 texts.t("CONTEST_DISABLED", "Игра отключена."),
                 show_alert=True,
+            )
+            return
+
+        required_tariff = "white" if _is_white_prize(round_obj.template.prize_type) else "standard"
+        subscription = await get_subscription_by_user_id_and_tariff(db2, db_user.id, required_tariff)
+        if not _user_allowed(subscription):
+            await _reply_not_eligible_for_template(
+                callback,
+                language=db_user.language,
+                prize_type=round_obj.template.prize_type,
             )
             return
 
@@ -258,15 +287,6 @@ async def handle_pick(callback: types.CallbackQuery, db_user, db: AsyncSession):
         await callback.answer("Некорректные данные", show_alert=True)
         return
 
-    # Re-check subscription
-    subscription = await get_subscription_by_user_id(db, db_user.id)
-    if not _user_allowed(subscription):
-        await callback.answer(
-            texts.t("CONTEST_NOT_ELIGIBLE", "Игра недоступна без активной подписки."),
-            show_alert=True,
-        )
-        return
-
     async with AsyncSessionLocal() as db2:
         active_rounds = await get_active_rounds(db2)
         round_obj = next((r for r in active_rounds if r.id == round_id), None)
@@ -275,6 +295,23 @@ async def handle_pick(callback: types.CallbackQuery, db_user, db: AsyncSession):
             await callback.answer(
                 texts.t("CONTEST_ROUND_FINISHED", "Раунд завершён."),
                 show_alert=True,
+            )
+            return
+
+        if not round_obj.template or not round_obj.template.is_enabled:
+            await callback.answer(
+                texts.t("CONTEST_DISABLED", "Игра отключена."),
+                show_alert=True,
+            )
+            return
+
+        required_tariff = "white" if _is_white_prize(round_obj.template.prize_type) else "standard"
+        subscription = await get_subscription_by_user_id_and_tariff(db2, db_user.id, required_tariff)
+        if not _user_allowed(subscription):
+            await _reply_not_eligible_for_template(
+                callback,
+                language=db_user.language,
+                prize_type=round_obj.template.prize_type,
             )
             return
 
@@ -309,6 +346,36 @@ async def handle_text_answer(message: types.Message, state: FSMContext, db_user,
         if not round_obj:
             await message.answer(
                 texts.t("CONTEST_ROUND_FINISHED", "Раунд завершён."),
+                reply_markup=get_back_keyboard(db_user.language),
+            )
+            await state.clear()
+            return
+
+        if not round_obj.template or not round_obj.template.is_enabled:
+            await message.answer(
+                texts.t("CONTEST_DISABLED", "Игра отключена."),
+                reply_markup=get_back_keyboard(db_user.language),
+            )
+            await state.clear()
+            return
+
+        required_tariff = "white" if _is_white_prize(round_obj.template.prize_type) else "standard"
+        subscription = await get_subscription_by_user_id_and_tariff(db2, db_user.id, required_tariff)
+        if not _user_allowed(subscription):
+            await message.answer(
+                (
+                    texts.t(
+                        "CONTEST_REQUIRES_WHITE",
+                        "⚪️ Эта игра с призом в гигабайтах.\n"
+                        "Чтобы играть в такие игры, нужно приобрести тариф ⚪️White (Саша Белый).",
+                    )
+                    if _is_white_prize(round_obj.template.prize_type)
+                    else texts.t(
+                        "CONTEST_REQUIRES_STANDARD",
+                        "🕷️ Эта игра с призом в днях подписки.\n"
+                        "Чтобы играть в такие игры, нужно приобрести тариф 🕷️ Standard (Питер Паркер).",
+                    )
+                ),
                 reply_markup=get_back_keyboard(db_user.language),
             )
             await state.clear()

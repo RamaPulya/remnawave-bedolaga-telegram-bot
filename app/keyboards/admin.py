@@ -565,7 +565,8 @@ def get_daily_contest_manage_keyboard(
                 InlineKeyboardButton(text=_t(texts, "ADMIN_CONTEST_START_MANUAL", "🧪 Ручной старт"), callback_data=f"admin_daily_manual_{template_id}"),
             ],
             [
-                InlineKeyboardButton(text=_t(texts, "ADMIN_EDIT_PRIZE", "🏅 Приз (дни)"), callback_data=f"admin_daily_edit_{template_id}_prize_days"),
+                InlineKeyboardButton(text=_t(texts, "ADMIN_EDIT_PRIZE_TYPE", "🏅 Тип приза"), callback_data=f"admin_daily_edit_{template_id}_prize_type"),
+                InlineKeyboardButton(text=_t(texts, "ADMIN_EDIT_PRIZE_VALUE", "🏅 Значение"), callback_data=f"admin_daily_edit_{template_id}_prize_value"),
                 InlineKeyboardButton(text=_t(texts, "ADMIN_EDIT_MAX_WINNERS", "👥 Победителей"), callback_data=f"admin_daily_edit_{template_id}_max_winners"),
             ],
             [
