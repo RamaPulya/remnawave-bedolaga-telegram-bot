@@ -20,6 +20,8 @@ docker-compose.override.yml
 !app/**
 !tests/
 !tests/**
+!locales/
+!locales/**
 
 # Дополнительно разрешаем README и лицензию (опционально)
 !README.md
