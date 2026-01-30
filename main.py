@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import logging
 import os
 import signal
@@ -141,6 +141,11 @@ async def main():
         )
 
     # Установим более высокий уровень логирования для "мусорных" логов
+    # --- SPIDERMAN OVERRIDES: STARTUP PATCHES START ---
+    from app.spiderman.apply_patches import apply_spiderman_patches
+
+    apply_spiderman_patches()
+    # --- SPIDERMAN OVERRIDES: STARTUP PATCHES END ---
     logging.getLogger('aiohttp.access').setLevel(logging.ERROR)
     logging.getLogger('aiohttp.client').setLevel(logging.WARNING)
     logging.getLogger('aiohttp.internal').setLevel(logging.WARNING)

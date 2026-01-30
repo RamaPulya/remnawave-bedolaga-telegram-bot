@@ -1,4 +1,4 @@
-import hashlib
+﻿import hashlib
 import hmac
 import html
 import logging
@@ -636,6 +636,19 @@ class Settings(BaseSettings):
     )
 
     DEBUG: bool = False
+    # --- SPIDERMAN OVERRIDES: CONFIG FLAGS START ---
+    SPIDERMAN_MODE: bool = False
+    CHANNEL_POST_ID: Optional[str] = None
+    SPIDERMAN_MENU_MEDIA_MAIN_MENU: str = ""
+    SPIDERMAN_MENU_MEDIA_SUBSCRIPTION: str = ""
+    SPIDERMAN_MENU_MEDIA_EXTEND_DAYS: str = ""
+    SPIDERMAN_MENU_MEDIA_EXTEND_TRAFFIC: str = ""
+    SPIDERMAN_MENU_MEDIA_SUPPORT: str = ""
+    SPIDERMAN_MENU_MEDIA_REFERRAL: str = ""
+    SPIDERMAN_MENU_MEDIA_PURCHASE_SUCCESS: str = ""
+    SPIDERMAN_MENU_ADMIN_MAIN: str = ""
+    SPIDERMAN_MENU_MEDIA_FALLBACK_PATH: str = ""
+    # --- SPIDERMAN OVERRIDES: CONFIG FLAGS END ---
     WEBHOOK_URL: str | None = None
     WEBHOOK_PATH: str = '/webhook'
     WEBHOOK_SECRET_TOKEN: str | None = None
