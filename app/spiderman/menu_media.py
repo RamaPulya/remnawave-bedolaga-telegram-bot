@@ -1,8 +1,9 @@
-﻿import asyncio
+import asyncio
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 from aiogram import Bot, types
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
@@ -20,35 +21,36 @@ from app.utils.message_patch import (
     prepare_privacy_safe_kwargs,
 )
 
+
 logger = logging.getLogger(__name__)
 
-SLOT_MAIN_MENU = "main_menu"
-SLOT_SUBSCRIPTION = "subscription"
-SLOT_EXTEND_DAYS = "extend_days"
-SLOT_EXTEND_TRAFFIC = "extend_traffic"
-SLOT_SUPPORT = "support"
-SLOT_REFERRAL = "referral"
-SLOT_PURCHASE_SUCCESS = "purchase_success"
-SLOT_ADMIN_MAIN = "admin_main"
+SLOT_MAIN_MENU = 'main_menu'
+SLOT_SUBSCRIPTION = 'subscription'
+SLOT_EXTEND_DAYS = 'extend_days'
+SLOT_EXTEND_TRAFFIC = 'extend_traffic'
+SLOT_SUPPORT = 'support'
+SLOT_REFERRAL = 'referral'
+SLOT_PURCHASE_SUCCESS = 'purchase_success'
+SLOT_ADMIN_MAIN = 'admin_main'
 
 _SLOT_ALIASES = {
-    "partner": SLOT_REFERRAL,
-    "partners": SLOT_REFERRAL,
-    "referrals": SLOT_REFERRAL,
+    'partner': SLOT_REFERRAL,
+    'partners': SLOT_REFERRAL,
+    'referrals': SLOT_REFERRAL,
 }
 
 _SLOT_SETTING_MAP = {
-    SLOT_MAIN_MENU: "SPIDERMAN_MENU_MEDIA_MAIN_MENU",
-    SLOT_SUBSCRIPTION: "SPIDERMAN_MENU_MEDIA_SUBSCRIPTION",
-    SLOT_EXTEND_DAYS: "SPIDERMAN_MENU_MEDIA_EXTEND_DAYS",
-    SLOT_EXTEND_TRAFFIC: "SPIDERMAN_MENU_MEDIA_EXTEND_TRAFFIC",
-    SLOT_SUPPORT: "SPIDERMAN_MENU_MEDIA_SUPPORT",
-    SLOT_REFERRAL: "SPIDERMAN_MENU_MEDIA_REFERRAL",
-    SLOT_PURCHASE_SUCCESS: "SPIDERMAN_MENU_MEDIA_PURCHASE_SUCCESS",
-    SLOT_ADMIN_MAIN: "SPIDERMAN_MENU_ADMIN_MAIN",
+    SLOT_MAIN_MENU: 'SPIDERMAN_MENU_MEDIA_MAIN_MENU',
+    SLOT_SUBSCRIPTION: 'SPIDERMAN_MENU_MEDIA_SUBSCRIPTION',
+    SLOT_EXTEND_DAYS: 'SPIDERMAN_MENU_MEDIA_EXTEND_DAYS',
+    SLOT_EXTEND_TRAFFIC: 'SPIDERMAN_MENU_MEDIA_EXTEND_TRAFFIC',
+    SLOT_SUPPORT: 'SPIDERMAN_MENU_MEDIA_SUPPORT',
+    SLOT_REFERRAL: 'SPIDERMAN_MENU_MEDIA_REFERRAL',
+    SLOT_PURCHASE_SUCCESS: 'SPIDERMAN_MENU_MEDIA_PURCHASE_SUCCESS',
+    SLOT_ADMIN_MAIN: 'SPIDERMAN_MENU_ADMIN_MAIN',
 }
 
-_MEDIA_TYPE_ORDER = ("animation", "video", "photo")
+_MEDIA_TYPE_ORDER = ('animation', 'video', 'photo')
 _MEDIA_CAPTION_LIMIT = 1000
 _MAX_RETRIES = 3
 _RETRY_DELAY = 0.5
@@ -63,7 +65,7 @@ class MediaSource:
 
 
 def normalize_slot(slot: Optional[str]) -> str:
-    normalized = (slot or "").strip().lower()
+    normalized = (slot or '').strip().lower()
     if normalized in _SLOT_ALIASES:
         return _SLOT_ALIASES[normalized]
     if normalized in _SLOT_SETTING_MAP:
@@ -90,7 +92,7 @@ def _get_slot_file_id(slot: str) -> Optional[str]:
 
 
 def _get_fallback_path() -> Optional[Path]:
-    raw_path = (getattr(settings, "SPIDERMAN_MENU_MEDIA_FALLBACK_PATH", "") or "").strip()
+    raw_path = (getattr(settings, 'SPIDERMAN_MENU_MEDIA_FALLBACK_PATH', '') or '').strip()
     if not raw_path:
         raw_path = settings.LOGO_FILE
     if not raw_path:
@@ -124,22 +126,22 @@ def _build_base_kwargs(
 ) -> dict[str, object]:
     kwargs: dict[str, object] = {}
     if parse_mode is not None:
-        kwargs["parse_mode"] = parse_mode
+        kwargs['parse_mode'] = parse_mode
     if keyboard is not None:
-        kwargs["reply_markup"] = keyboard
+        kwargs['reply_markup'] = keyboard
     return kwargs
 
 
 def _get_caption_language(callback: types.CallbackQuery) -> Optional[str]:
-    user = getattr(callback, "from_user", None)
-    language_code = getattr(user, "language_code", None)
+    user = getattr(callback, 'from_user', None)
+    language_code = getattr(user, 'language_code', None)
     if language_code:
         return language_code
     return None
 
 
 def _is_message_not_modified(error: TelegramBadRequest) -> bool:
-    return "message is not modified" in str(error).lower()
+    return 'message is not modified' in str(error).lower()
 
 
 async def _try_update_reply_markup(
@@ -173,7 +175,7 @@ async def _answer_text(
         caption = append_privacy_hint(caption, language)
         kwargs = prepare_privacy_safe_kwargs(kwargs)
 
-    kwargs.setdefault("parse_mode", parse_mode or "HTML")
+    kwargs.setdefault('parse_mode', parse_mode or 'HTML')
     await callback.message.answer(caption, **kwargs)
 
 
@@ -183,7 +185,7 @@ async def _edit_or_answer_text(
     keyboard: Optional[types.InlineKeyboardMarkup],
     parse_mode: Optional[str],
 ) -> None:
-    resolved_parse_mode = parse_mode or "HTML"
+    resolved_parse_mode = parse_mode or 'HTML'
     try:
         if callback.message.photo or callback.message.video or callback.message.animation:
             await callback.message.edit_caption(
@@ -205,12 +207,12 @@ async def _edit_or_answer_text(
 
 def _get_local_media_type(path: Path) -> Optional[str]:
     suffix = path.suffix.lower()
-    if suffix in {".jpg", ".jpeg", ".png", ".webp"}:
-        return "photo"
-    if suffix in {".gif"}:
-        return "animation"
-    if suffix in {".mp4", ".mov", ".mkv", ".webm"}:
-        return "video"
+    if suffix in {'.jpg', '.jpeg', '.png', '.webp'}:
+        return 'photo'
+    if suffix in {'.gif'}:
+        return 'animation'
+    if suffix in {'.mp4', '.mov', '.mkv', '.webm'}:
+        return 'video'
     return None
 
 
@@ -244,14 +246,14 @@ async def _send_media_with_type(
 ) -> types.Message:
     for attempt in range(_MAX_RETRIES):
         try:
-            if media_type == "animation":
+            if media_type == 'animation':
                 return await message.answer_animation(
                     animation=payload,
                     caption=caption,
                     reply_markup=keyboard,
                     parse_mode=parse_mode,
                 )
-            if media_type == "video":
+            if media_type == 'video':
                 return await message.answer_video(
                     video=payload,
                     caption=caption,
@@ -267,7 +269,7 @@ async def _send_media_with_type(
         except TelegramNetworkError as error:
             if attempt < _MAX_RETRIES - 1:
                 logger.warning(
-                    "🌐 Сетевая ошибка отправки медиа (%s), попытка %d/%d: %s",
+                    '🌐 Сетевая ошибка отправки медиа (%s), попытка %d/%d: %s',
                     media_type,
                     attempt + 1,
                     _MAX_RETRIES,
@@ -276,6 +278,8 @@ async def _send_media_with_type(
                 await asyncio.sleep(_RETRY_DELAY * (attempt + 1))
                 continue
             raise
+
+    raise RuntimeError('Не удалось отправить медиа после повторных попыток')
 
 
 async def _edit_media_with_type(
@@ -288,13 +292,13 @@ async def _edit_media_with_type(
 ) -> None:
     for attempt in range(_MAX_RETRIES):
         try:
-            if media_type == "animation":
+            if media_type == 'animation':
                 media = InputMediaAnimation(
                     media=payload,
                     caption=caption,
                     parse_mode=parse_mode,
                 )
-            elif media_type == "video":
+            elif media_type == 'video':
                 media = InputMediaVideo(
                     media=payload,
                     caption=caption,
@@ -311,7 +315,7 @@ async def _edit_media_with_type(
         except TelegramNetworkError as error:
             if attempt < _MAX_RETRIES - 1:
                 logger.warning(
-                    "🌐 Сетевая ошибка редактирования медиа (%s), попытка %d/%d: %s",
+                    '🌐 Сетевая ошибка редактирования медиа (%s), попытка %d/%d: %s',
                     media_type,
                     attempt + 1,
                     _MAX_RETRIES,
@@ -362,7 +366,7 @@ async def _send_or_edit_media(
             break
 
     if last_error:
-        logger.warning("⚠️ Не удалось отправить медиа (%s): %s", source.file_id or source.local_path, last_error)
+        logger.warning('⚠️ Не удалось отправить медиа (%s): %s', source.file_id or source.local_path, last_error)
     return False
 
 
@@ -372,7 +376,7 @@ async def edit_or_answer_media(
     slot: str,
     caption: str,
     keyboard: Optional[types.InlineKeyboardMarkup],
-    parse_mode: Optional[str] = "HTML",
+    parse_mode: Optional[str] = 'HTML',
     force_text: bool = False,
 ) -> None:
     if not callback.message:
@@ -401,7 +405,7 @@ async def edit_or_answer_media(
             return
         await _edit_or_answer_text(callback, caption, keyboard, parse_mode)
     except TelegramNetworkError as error:
-        logger.warning("🌐 Сетевая ошибка отправки медиа: %s", error)
+        logger.warning('🌐 Сетевая ошибка отправки медиа: %s', error)
         await _edit_or_answer_text(callback, caption, keyboard, parse_mode)
 
 
@@ -411,7 +415,7 @@ async def answer_media(
     slot: str,
     caption: str,
     keyboard: Optional[types.InlineKeyboardMarkup],
-    parse_mode: Optional[str] = "HTML",
+    parse_mode: Optional[str] = 'HTML',
 ) -> types.Message:
     if not settings.SPIDERMAN_MODE:
         return await message.answer(caption, reply_markup=keyboard, parse_mode=parse_mode)
@@ -443,7 +447,7 @@ async def answer_media(
             break
 
     if last_error:
-        logger.warning("⚠️ Не удалось отправить медиа (%s): %s", source.file_id or source.local_path, last_error)
+        logger.warning('⚠️ Не удалось отправить медиа (%s): %s', source.file_id or source.local_path, last_error)
     return await message.answer(caption, reply_markup=keyboard, parse_mode=parse_mode)
 
 
@@ -454,7 +458,7 @@ async def send_media_to_chat(
     slot: str,
     caption: str,
     keyboard: Optional[types.InlineKeyboardMarkup],
-    parse_mode: Optional[str] = "HTML",
+    parse_mode: Optional[str] = 'HTML',
 ) -> types.Message:
     if not settings.SPIDERMAN_MODE:
         return await bot.send_message(
@@ -487,7 +491,7 @@ async def send_media_to_chat(
 
     for media_type in candidates:
         try:
-            if media_type == "animation":
+            if media_type == 'animation':
                 sent = await bot.send_animation(
                     chat_id=chat_id,
                     animation=payload,
@@ -495,7 +499,7 @@ async def send_media_to_chat(
                     reply_markup=keyboard,
                     parse_mode=parse_mode,
                 )
-            elif media_type == "video":
+            elif media_type == 'video':
                 sent = await bot.send_video(
                     chat_id=chat_id,
                     video=payload,
@@ -525,7 +529,7 @@ async def send_media_to_chat(
 
     if last_error:
         logger.warning(
-            "🕷️ Не удалось отправить медиа (%s): %s",
+            '🕷️ Не удалось отправить медиа (%s): %s',
             source.file_id or source.local_path,
             last_error,
         )
@@ -543,7 +547,7 @@ async def edit_message_media(
     slot: str,
     caption: str,
     keyboard: Optional[types.InlineKeyboardMarkup],
-    parse_mode: Optional[str] = "HTML",
+    parse_mode: Optional[str] = 'HTML',
 ) -> bool:
     if not settings.SPIDERMAN_MODE:
         return False
@@ -581,5 +585,7 @@ async def edit_message_media(
             break
 
     if last_error:
-        logger.warning("⚠️ Не удалось обновить медиа в сообщении (%s): %s", source.file_id or source.local_path, last_error)
+        logger.warning(
+            '⚠️ Не удалось обновить медиа в сообщении (%s): %s', source.file_id or source.local_path, last_error
+        )
     return False

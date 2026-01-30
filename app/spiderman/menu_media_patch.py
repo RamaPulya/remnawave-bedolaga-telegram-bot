@@ -1,3 +1,5 @@
+import importlib
+
 from app.spiderman.menu_media import (
     SLOT_MAIN_MENU,
     SLOT_REFERRAL,
@@ -11,7 +13,7 @@ def _build_wrapper(slot: str):
         callback,
         caption,
         keyboard,
-        parse_mode: str | None = "HTML",
+        parse_mode: str | None = 'HTML',
         *,
         force_text: bool = False,
     ):
@@ -28,11 +30,11 @@ def _build_wrapper(slot: str):
 
 
 def apply_menu_media_patches() -> None:
-    import app.handlers.menu as menu_handlers
-    import app.handlers.support as support_handlers
-    import app.handlers.referral as referral_handlers
+    menu_handlers = importlib.import_module('app.handlers.menu')
+    referral_handlers = importlib.import_module('app.handlers.referral')
+    support_handlers = importlib.import_module('app.handlers.support')
 
-    if getattr(menu_handlers, "_spiderman_menu_media_patched", False):
+    if getattr(menu_handlers, '_spiderman_menu_media_patched', False):
         return
 
     menu_handlers.edit_or_answer_photo = _build_wrapper(SLOT_MAIN_MENU)
