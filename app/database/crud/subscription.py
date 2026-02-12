@@ -1,11 +1,12 @@
 import logging
 from collections.abc import Iterable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.config import settings
 from app.database.crud.notification import clear_notifications
@@ -22,6 +23,16 @@ from app.utils.timezone import format_local_datetime
 
 
 logger = logging.getLogger(__name__)
+
+_WEBHOOK_GUARD_SECONDS = 60
+
+
+def is_recently_updated_by_webhook(subscription: Subscription) -> bool:
+    """Return True if subscription was updated by webhook within guard window."""
+    if not subscription.last_webhook_update_at:
+        return False
+    elapsed = (datetime.now(UTC).replace(tzinfo=None) - subscription.last_webhook_update_at).total_seconds()
+    return elapsed < _WEBHOOK_GUARD_SECONDS
 
 
 async def get_subscription_by_user_id(db: AsyncSession, user_id: int) -> Subscription | None:
@@ -94,6 +105,25 @@ async def create_trial_subscription(
             )
 
     end_date = datetime.utcnow() + timedelta(days=duration_days)
+
+    # Check for existing PENDING trial subscription (retry after failed payment)
+    existing = await get_subscription_by_user_id(db, user_id)
+    if existing and existing.is_trial and existing.status == SubscriptionStatus.PENDING.value:
+        existing.status = SubscriptionStatus.ACTIVE.value
+        existing.start_date = datetime.utcnow()
+        existing.end_date = end_date
+        existing.traffic_limit_gb = traffic_limit_gb
+        existing.device_limit = device_limit
+        existing.connected_squads = final_squads
+        existing.tariff_id = tariff_id
+        await db.commit()
+        await db.refresh(existing)
+        logger.info(
+            '🎁 Обновлена PENDING триальная подписка %s для пользователя %s',
+            existing.id,
+            user_id,
+        )
+        return existing
 
     subscription = Subscription(
         user_id=user_id,
@@ -258,26 +288,29 @@ async def replace_subscription(
     await db.commit()
     await db.refresh(subscription)
 
+    # Очищаем старые записи об отправленных уведомлениях при замене подписки
+    # (аналогично extend_subscription), чтобы новые уведомления отправлялись корректно
+    await clear_notifications(db, subscription.id)
+
     if update_server_counters:
         try:
             from app.database.crud.server_squad import (
-                add_user_to_servers,
                 get_server_ids_by_uuids,
-                remove_user_from_servers,
+                update_server_user_counts,
             )
 
             squads_to_remove = old_squads - new_squads
             squads_to_add = new_squads - old_squads
 
-            if squads_to_remove:
-                server_ids = await get_server_ids_by_uuids(db, list(squads_to_remove))
-                if server_ids:
-                    await remove_user_from_servers(db, sorted(server_ids))
+            remove_ids = await get_server_ids_by_uuids(db, list(squads_to_remove)) if squads_to_remove else []
+            add_ids = await get_server_ids_by_uuids(db, list(squads_to_add)) if squads_to_add else []
 
-            if squads_to_add:
-                server_ids = await get_server_ids_by_uuids(db, list(squads_to_add))
-                if server_ids:
-                    await add_user_to_servers(db, sorted(server_ids))
+            if remove_ids or add_ids:
+                await update_server_user_counts(
+                    db,
+                    add_ids=add_ids or None,
+                    remove_ids=remove_ids or None,
+                )
 
             logger.info(
                 '♻️ Обновлены параметры подписки %s: удалено сквадов %s, добавлено %s',
@@ -324,9 +357,8 @@ async def extend_subscription(
     )
 
     # Определяем, происходит ли СМЕНА тарифа (а не продление того же)
-    is_tariff_change = (
-        tariff_id is not None and subscription.tariff_id is not None and tariff_id != subscription.tariff_id
-    )
+    # Включает переход из классического режима (tariff_id=None) в тарифный
+    is_tariff_change = tariff_id is not None and (subscription.tariff_id is None or tariff_id != subscription.tariff_id)
 
     if is_tariff_change:
         logger.info(f'🔄 Обнаружена СМЕНА тарифа: {subscription.tariff_id} → {tariff_id}')
@@ -407,17 +439,28 @@ async def extend_subscription(
 
     if traffic_limit_gb is not None:
         old_traffic = subscription.traffic_limit_gb
-        subscription.traffic_limit_gb = traffic_limit_gb
         subscription.traffic_used_gb = 0.0
-        # Сбрасываем все докупки трафика при смене тарифа
-        from sqlalchemy import delete as sql_delete
 
-        from app.database.models import TrafficPurchase
+        if is_tariff_change:
+            # При СМЕНЕ тарифа сбрасываем все докупки трафика
+            subscription.traffic_limit_gb = traffic_limit_gb
+            from sqlalchemy import delete as sql_delete
 
-        await db.execute(sql_delete(TrafficPurchase).where(TrafficPurchase.subscription_id == subscription.id))
-        subscription.purchased_traffic_gb = 0
-        subscription.traffic_reset_at = None  # Сбрасываем дату сброса трафика
-        logger.info(f'📊 Обновлен лимит трафика: {old_traffic} ГБ → {traffic_limit_gb} ГБ (все докупки сброшены)')
+            from app.database.models import TrafficPurchase
+
+            await db.execute(sql_delete(TrafficPurchase).where(TrafficPurchase.subscription_id == subscription.id))
+            subscription.purchased_traffic_gb = 0
+            subscription.traffic_reset_at = None
+            logger.info(
+                f'📊 Обновлен лимит трафика: {old_traffic} ГБ → {traffic_limit_gb} ГБ (смена тарифа, докупки сброшены)'
+            )
+        else:
+            # При ПРОДЛЕНИИ того же тарифа — сохраняем докупленный трафик
+            purchased = subscription.purchased_traffic_gb or 0
+            subscription.traffic_limit_gb = traffic_limit_gb + purchased
+            logger.info(
+                f'📊 Обновлен лимит трафика: {old_traffic} ГБ → {traffic_limit_gb + purchased} ГБ (докупки сохранены: {purchased} ГБ)'
+            )
     elif settings.RESET_TRAFFIC_ON_PAYMENT:
         subscription.traffic_used_gb = 0.0
         # В режиме тарифов сохраняем докупленный трафик при продлении
@@ -582,6 +625,9 @@ async def decrement_subscription_server_counts(
     if not subscription:
         return
 
+    # Save ID before any DB operations that might invalidate the ORM object
+    sub_id = subscription.id
+
     server_ids: set[int] = set()
 
     if subscription_servers is not None:
@@ -590,12 +636,12 @@ async def decrement_subscription_server_counts(
                 server_ids.add(sub_server.server_squad_id)
     else:
         try:
-            ids_from_links = await get_subscription_server_ids(db, subscription.id)
+            ids_from_links = await get_subscription_server_ids(db, sub_id)
             server_ids.update(ids_from_links)
         except Exception as error:
             logger.error(
                 '⚠️ Не удалось получить серверы подписки %s для уменьшения счетчика: %s',
-                subscription.id,
+                sub_id,
                 error,
             )
 
@@ -609,7 +655,7 @@ async def decrement_subscription_server_counts(
         except Exception as error:
             logger.error(
                 '⚠️ Не удалось сопоставить сквады подписки %s с серверами: %s',
-                subscription.id,
+                sub_id,
                 error,
             )
 
@@ -619,12 +665,20 @@ async def decrement_subscription_server_counts(
     try:
         from app.database.crud.server_squad import remove_user_from_servers
 
-        await remove_user_from_servers(db, sorted(server_ids))
+        # Use savepoint so StaleDataError rollback doesn't affect the parent transaction
+        async with db.begin_nested():
+            await remove_user_from_servers(db, list(server_ids))
+    except StaleDataError:
+        logger.warning(
+            '⚠️ Подписка %s уже удалена (StaleDataError), пропускаем декремент серверов %s',
+            sub_id,
+            list(server_ids),
+        )
     except Exception as error:
         logger.error(
             '⚠️ Ошибка уменьшения счетчика пользователей серверов %s для подписки %s: %s',
             list(server_ids),
-            subscription.id,
+            sub_id,
             error,
         )
 
@@ -710,7 +764,10 @@ async def get_subscriptions_for_autopay(db: AsyncSession) -> list[Subscription]:
 
     result = await db.execute(
         select(Subscription)
-        .options(selectinload(Subscription.user))
+        .options(
+            selectinload(Subscription.user),
+            selectinload(Subscription.tariff),
+        )
         .where(
             and_(
                 Subscription.status == SubscriptionStatus.ACTIVE.value,
@@ -723,6 +780,11 @@ async def get_subscriptions_for_autopay(db: AsyncSession) -> list[Subscription]:
 
     ready_for_autopay = []
     for subscription in all_autopay_subscriptions:
+        # Суточные подписки имеют свой механизм продления (DailySubscriptionService),
+        # глобальный autopay на них не распространяется
+        if subscription.tariff and getattr(subscription.tariff, 'is_daily', False):
+            continue
+
         days_until_expiry = (subscription.end_date - current_time).days
 
         if days_until_expiry <= subscription.autopay_days_before and subscription.end_date > current_time:

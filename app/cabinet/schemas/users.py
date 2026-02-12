@@ -39,6 +39,17 @@ class SortByEnum(str, Enum):
 # === User Subscription Info ===
 
 
+class TrafficPurchaseItem(BaseModel):
+    """Individual traffic purchase record."""
+
+    id: int
+    traffic_gb: int
+    expires_at: datetime
+    created_at: datetime
+    days_remaining: int
+    is_expired: bool
+
+
 class UserSubscriptionInfo(BaseModel):
     """User subscription information."""
 
@@ -55,6 +66,8 @@ class UserSubscriptionInfo(BaseModel):
     autopay_enabled: bool = False
     is_active: bool = False
     days_remaining: int = 0
+    purchased_traffic_gb: int = 0
+    traffic_purchases: list[TrafficPurchaseItem] = []
 
 
 class UserPromoGroupInfo(BaseModel):
@@ -189,8 +202,57 @@ class UserDetailResponse(BaseModel):
     promo_offer_discount_source: str | None = None
     promo_offer_discount_expires_at: datetime | None = None
 
+    # Campaign
+    campaign_name: str | None = None
+    campaign_id: int | None = None
+
     # Recent transactions
     recent_transactions: list[UserTransactionItem] = []
+
+    # Remnawave UUID
+    remnawave_uuid: str | None = None
+
+
+# === Panel Info ===
+
+
+class UserPanelInfoResponse(BaseModel):
+    """Panel info for user from Remnawave."""
+
+    found: bool = False
+    trojan_password: str | None = None
+    vless_uuid: str | None = None
+    ss_password: str | None = None
+    subscription_url: str | None = None
+    happ_link: str | None = None
+    used_traffic_bytes: int = 0
+    lifetime_used_traffic_bytes: int = 0
+    traffic_limit_bytes: int = 0
+    first_connected_at: datetime | None = None
+    online_at: datetime | None = None
+    last_connected_node_uuid: str | None = None
+    last_connected_node_name: str | None = None
+
+
+# === Node Usage ===
+
+
+class UserNodeUsageItem(BaseModel):
+    """Per-node traffic usage item."""
+
+    node_uuid: str
+    node_name: str
+    country_code: str = ''
+    total_bytes: int
+    daily_bytes: list[int] = []
+
+
+class UserNodeUsageResponse(BaseModel):
+    """Node usage response with 30-day daily breakdown."""
+
+    items: list[UserNodeUsageItem]
+    categories: list[str] = []
+    period_days: int = 30
 
 
 # === User Actions ===
@@ -235,6 +297,12 @@ class UpdateSubscriptionRequest(BaseModel):
 
     # For toggle_autopay
     autopay_enabled: bool | None = Field(None, description='Enable/disable autopay')
+
+    # For add_traffic action
+    traffic_gb: int | None = Field(None, ge=1, description='Traffic GB to add')
+
+    # For remove_traffic action
+    traffic_purchase_id: int | None = Field(None, description='Traffic purchase ID to remove')
 
     # For create new subscription
     is_trial: bool | None = Field(None, description='Is trial subscription')
@@ -297,6 +365,56 @@ class UpdatePromoGroupResponse(BaseModel):
     new_promo_group_id: int | None = None
     promo_group_name: str | None = None
     message: str
+
+
+class UpdateReferralCommissionRequest(BaseModel):
+    """Request to update user referral commission percent."""
+
+    commission_percent: int | None = Field(
+        None, ge=0, le=100, description='Referral commission percent (null for default)'
+    )
+
+
+class UpdateReferralCommissionResponse(BaseModel):
+    """Response after referral commission update."""
+
+    success: bool
+    old_commission_percent: int | None = None
+    new_commission_percent: int | None = None
+    message: str
+
+
+class DeviceInfo(BaseModel):
+    """Individual device info."""
+
+    hwid: str
+    platform: str = ''
+    device_model: str = ''
+    created_at: str | None = None
+
+
+class UserDevicesResponse(BaseModel):
+    """User devices from panel."""
+
+    devices: list[DeviceInfo] = []
+    total: int = 0
+    device_limit: int = 0
+
+
+class DeleteDeviceResponse(BaseModel):
+    """Response after device deletion."""
+
+    success: bool
+    message: str
+    deleted_hwid: str | None = None
+
+
+class ResetDevicesResponse(BaseModel):
+    """Response after resetting all devices."""
+
+    success: bool
+    message: str
+    deleted_count: int = 0
 
 
 class DeleteUserRequest(BaseModel):
@@ -391,6 +509,15 @@ class UserAvailableTariffItem(BaseModel):
     price_per_day_kopeks: int = 0
     min_days: int = 1
     max_days: int = 365
+
+    # Device limits
+    device_price_kopeks: int | None = None
+    max_device_limit: int | None = None
+
+    # Traffic topup
+    traffic_topup_enabled: bool = False
+    traffic_topup_packages: dict[str, int] = {}
+    max_topup_traffic_gb: int = 0
 
     # Access info
     is_available: bool = True  # Available for this user's promo group
@@ -498,3 +625,72 @@ class PanelSyncStatusResponse(BaseModel):
     # Differences
     has_differences: bool = False
     differences: list[str] = []
+
+
+# === Admin User Management Actions ===
+
+
+class FullDeleteUserRequest(BaseModel):
+    """Request for full user deletion (bot + panel)."""
+
+    delete_from_panel: bool = Field(default=True, description='Also delete user from Remnawave panel')
+    reason: str | None = Field(None, max_length=500, description='Reason for deletion')
+
+
+class FullDeleteUserResponse(BaseModel):
+    """Response after full user deletion."""
+
+    success: bool
+    message: str
+    deleted_from_bot: bool = False
+    deleted_from_panel: bool = False
+    panel_error: str | None = None
+
+
+class ResetTrialRequest(BaseModel):
+    """Request to reset user trial."""
+
+    reason: str | None = Field(None, max_length=500, description='Reason for trial reset')
+
+
+class ResetTrialResponse(BaseModel):
+    """Response after trial reset."""
+
+    success: bool
+    message: str
+    subscription_deleted: bool = False
+    has_used_trial_reset: bool = False
+
+
+class ResetSubscriptionRequest(BaseModel):
+    """Request to reset user subscription."""
+
+    deactivate_in_panel: bool = Field(default=True, description='Also deactivate in Remnawave panel')
+    reason: str | None = Field(None, max_length=500, description='Reason for subscription reset')
+
+
+class ResetSubscriptionResponse(BaseModel):
+    """Response after subscription reset."""
+
+    success: bool
+    message: str
+    subscription_deleted: bool = False
+    panel_deactivated: bool = False
+    panel_error: str | None = None
+
+
+class DisableUserRequest(BaseModel):
+    """Request to disable user."""
+
+    reason: str | None = Field(None, max_length=500, description='Reason for disabling')
+
+
+class DisableUserResponse(BaseModel):
+    """Response after user disable."""
+
+    success: bool
+    message: str
+    subscription_deactivated: bool = False
+    panel_deactivated: bool = False
+    user_blocked: bool = False
+    panel_error: str | None = None

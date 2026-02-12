@@ -119,7 +119,7 @@ class EmailService:
             verification_token: Verification token
             verification_url: Base URL for verification (token will be appended)
             username: User's name for personalization
-            language: Language code (ru, en, zh, ua)
+            language: Language code (ru, en, zh, ua, fa)
             custom_subject: Override subject from admin template
             custom_body_html: Override body HTML from admin template (already wrapped in base template)
 
@@ -173,6 +173,16 @@ class EmailService:
                 'expires': f'Посилання дійсне протягом {expire_hours} годин.',
                 'ignore': 'Якщо ви не створювали акаунт, просто проігноруйте цей лист.',
                 'regards': 'З повагою,',
+            },
+            'fa': {
+                'greeting': f'سلام{", " + username if username else ""}!',
+                'subject': 'تایید آدرس ایمیل',
+                'intro': 'از ثبت‌نام شما سپاسگزاریم! لطفاً با کلیک روی دکمه زیر ایمیل خود را تایید کنید:',
+                'button': 'تایید ایمیل',
+                'or_copy': 'یا این لینک را در مرورگر خود کپی و باز کنید:',
+                'expires': f'این لینک تا {expire_hours} ساعت معتبر است.',
+                'ignore': 'اگر شما این حساب را ایجاد نکرده‌اید، این ایمیل را نادیده بگیرید.',
+                'regards': 'با احترام،',
             },
         }
 
@@ -236,7 +246,7 @@ class EmailService:
             reset_token: Password reset token
             reset_url: Base URL for password reset (token will be appended)
             username: User's name for personalization
-            language: Language code (ru, en, zh, ua)
+            language: Language code (ru, en, zh, ua, fa)
             custom_subject: Override subject from admin template
             custom_body_html: Override body HTML from admin template (already wrapped in base template)
 
@@ -291,6 +301,16 @@ class EmailService:
                 'warning': "Якщо ви не запитували скидання пароля, проігноруйте цей лист або зв'яжіться з підтримкою.",
                 'regards': 'З повагою,',
             },
+            'fa': {
+                'greeting': f'سلام{", " + username if username else ""}!',
+                'subject': 'بازنشانی رمز عبور',
+                'intro': 'درخواستی برای بازنشانی رمز عبور شما دریافت شد. برای تعیین رمز جدید روی دکمه زیر بزنید:',
+                'button': 'بازنشانی رمز عبور',
+                'or_copy': 'یا این لینک را در مرورگر خود کپی و باز کنید:',
+                'expires': f'این لینک تا {expire_hours} ساعت معتبر است.',
+                'warning': 'اگر شما درخواست بازنشانی رمز عبور نداده‌اید، این ایمیل را نادیده بگیرید یا با پشتیبانی تماس بگیرید.',
+                'regards': 'با احترام،',
+            },
         }
 
         t = texts.get(language, texts['ru'])
@@ -326,6 +346,131 @@ class EmailService:
                 <p><a href="{full_url}">{full_url}</a></p>
                 <p>{t['expires']}</p>
                 <p class="warning">{t['warning']}</p>
+                <div class="footer">
+                    <p>{t['regards']}<br>{self.from_name}</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+
+        return self.send_email(to_email, subject, body_html)
+
+    def send_email_change_code(
+        self,
+        to_email: str,
+        code: str,
+        username: str | None = None,
+        language: str = 'ru',
+        custom_subject: str | None = None,
+        custom_body_html: str | None = None,
+    ) -> bool:
+        """
+        Send email change verification code.
+
+        Args:
+            to_email: New email address
+            code: 6-digit verification code
+            username: User's name for personalization
+            language: Language code (ru, en, zh, ua, fa)
+            custom_subject: Override subject from admin template
+            custom_body_html: Override body HTML from admin template
+
+        Returns:
+            True if email was sent successfully, False otherwise
+        """
+        if custom_subject and custom_body_html:
+            return self.send_email(to_email, custom_subject, custom_body_html)
+
+        expire_minutes = settings.get_cabinet_email_change_code_expire_minutes()
+
+        texts = {
+            'ru': {
+                'greeting': f'Здравствуйте{", " + username if username else ""}!',
+                'subject': 'Код подтверждения для смены email',
+                'intro': 'Вы запросили смену email адреса. Используйте код ниже для подтверждения:',
+                'code_label': 'Ваш код подтверждения:',
+                'expires': f'Код действителен в течение {expire_minutes} минут.',
+                'ignore': 'Если вы не запрашивали смену email, просто проигнорируйте это письмо.',
+                'regards': 'С уважением,',
+            },
+            'en': {
+                'greeting': f'Hello{", " + username if username else ""}!',
+                'subject': 'Email change verification code',
+                'intro': 'You requested to change your email address. Use the code below to confirm:',
+                'code_label': 'Your verification code:',
+                'expires': f'This code will expire in {expire_minutes} minutes.',
+                'ignore': "If you didn't request an email change, you can safely ignore this email.",
+                'regards': 'Best regards,',
+            },
+            'zh': {
+                'greeting': f'您好{", " + username if username else ""}!',
+                'subject': '邮箱更换验证码',
+                'intro': '您请求更换邮箱地址。请使用以下验证码确认：',
+                'code_label': '您的验证码：',
+                'expires': f'此验证码将在 {expire_minutes} 分钟后过期。',
+                'ignore': '如果您没有请求更换邮箱，请忽略此邮件。',
+                'regards': '此致,',
+            },
+            'ua': {
+                'greeting': f'Вітаємо{", " + username if username else ""}!',
+                'subject': 'Код підтвердження для зміни email',
+                'intro': 'Ви запросили зміну email адреси. Використовуйте код нижче для підтвердження:',
+                'code_label': 'Ваш код підтвердження:',
+                'expires': f'Код дійсний протягом {expire_minutes} хвилин.',
+                'ignore': 'Якщо ви не запитували зміну email, просто проігноруйте цей лист.',
+                'regards': 'З повагою,',
+            },
+            'fa': {
+                'greeting': f'سلام{", " + username if username else ""}!',
+                'subject': 'کد تایید تغییر ایمیل',
+                'intro': 'شما درخواست تغییر ایمیل داده‌اید. برای تایید از کد زیر استفاده کنید:',
+                'code_label': 'کد تایید شما:',
+                'expires': f'این کد تا {expire_minutes} دقیقه معتبر است.',
+                'ignore': 'اگر شما درخواست تغییر ایمیل نداده‌اید، این ایمیل را نادیده بگیرید.',
+                'regards': 'با احترام،',
+            },
+        }
+
+        t = texts.get(language, texts['ru'])
+
+        subject = t['subject']
+        body_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .code-box {{
+                    background-color: #f8f9fa;
+                    border: 2px solid #007bff;
+                    border-radius: 8px;
+                    padding: 20px;
+                    text-align: center;
+                    margin: 20px 0;
+                }}
+                .code {{
+                    font-size: 32px;
+                    font-weight: bold;
+                    letter-spacing: 8px;
+                    color: #007bff;
+                    font-family: monospace;
+                }}
+                .footer {{ margin-top: 30px; font-size: 12px; color: #666; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h2>{t['greeting']}</h2>
+                <p>{t['intro']}</p>
+                <div class="code-box">
+                    <p>{t['code_label']}</p>
+                    <p class="code">{code}</p>
+                </div>
+                <p>{t['expires']}</p>
+                <p>{t['ignore']}</p>
                 <div class="footer">
                     <p>{t['regards']}<br>{self.from_name}</p>
                 </div>

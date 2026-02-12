@@ -3,7 +3,7 @@ from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +22,7 @@ from app.database.crud.user import (
 from app.database.crud.user_message import get_random_active_message
 from app.database.models import PinnedMessage, SubscriptionStatus, UserStatus
 from app.keyboards.inline import (
+    get_back_keyboard,
     get_language_selection_keyboard,
     get_main_menu_keyboard_async,
     get_post_registration_keyboard,
@@ -35,7 +36,6 @@ from app.middlewares.channel_checker import (
     get_pending_payload_from_redis,
 )
 from app.services.admin_notification_service import AdminNotificationService
-from app.services.blacklist_service import blacklist_service
 from app.services.campaign_service import AdvertisingCampaignService
 from app.services.main_menu_button_service import MainMenuButtonService
 from app.services.pinned_message_service import (
@@ -309,24 +309,27 @@ async def cmd_start(message: types.Message, state: FSMContext, db: AsyncSession,
     logger.info(f'🚀 START: Обработка /start от {message.from_user.id}')
 
     data = await state.get_data() or {}
-    had_pending_payload = 'pending_start_payload' in data
-    pending_start_payload = data.pop('pending_start_payload', None)
-    had_campaign_notification_flag = 'campaign_notification_sent' in data
-    campaign_notification_sent = data.pop('campaign_notification_sent', False)
-    state_needs_update = had_pending_payload or had_campaign_notification_flag
+
+    # ИСПРАВЛЕНИЕ БАГА: используем .get() вместо .pop() для campaign_notification_sent
+    # pending_start_payload обрабатывается отдельно ниже
+    campaign_notification_sent = data.get('campaign_notification_sent', False)
+    state_needs_update = False
+
+    # Получаем payload из state или Redis
+    pending_start_payload = data.get('pending_start_payload', None)
 
     # Если в FSM state нет payload, пробуем получить из Redis (резервный механизм)
     if not pending_start_payload:
         redis_payload = await get_pending_payload_from_redis(message.from_user.id)
         if redis_payload:
             pending_start_payload = redis_payload
+            data['pending_start_payload'] = redis_payload
             state_needs_update = True
             logger.info(
                 "📦 START: Payload '%s' восстановлен из Redis (fallback)",
                 pending_start_payload,
             )
-            # Очищаем Redis после получения
-            await delete_pending_payload_from_redis(message.from_user.id)
+            # НЕ удаляем Redis payload здесь - удаление только после успешной регистрации
 
     referral_code = None
     campaign = None
@@ -483,9 +486,24 @@ async def cmd_start(message: types.Message, state: FSMContext, db: AsyncSession,
         logger.info(f'🔄 Удаленный пользователь {user.telegram_id} начинает повторную регистрацию')
 
         try:
-            from sqlalchemy import delete
+            from sqlalchemy import delete, update as sa_update
 
-            from app.database.models import PromoCodeUse, ReferralEarning, SubscriptionServer, Transaction
+            from app.database.models import (
+                CloudPaymentsPayment,
+                CryptoBotPayment,
+                FreekassaPayment,
+                HeleketPayment,
+                KassaAiPayment,
+                MulenPayPayment,
+                Pal24Payment,
+                PlategaPayment,
+                PromoCodeUse,
+                ReferralEarning,
+                SubscriptionServer,
+                Transaction,
+                WataPayment,
+                YooKassaPayment,
+            )
 
             if user.subscription:
                 await decrement_subscription_server_counts(db, user.subscription)
@@ -500,8 +518,36 @@ async def cmd_start(message: types.Message, state: FSMContext, db: AsyncSession,
 
             await db.execute(delete(PromoCodeUse).where(PromoCodeUse.user_id == user.id))
 
+            await db.execute(
+                sa_update(ReferralEarning)
+                .where(ReferralEarning.user_id == user.id)
+                .values(referral_transaction_id=None)
+            )
+            await db.execute(
+                sa_update(ReferralEarning)
+                .where(ReferralEarning.referral_id == user.id)
+                .values(referral_transaction_id=None)
+            )
             await db.execute(delete(ReferralEarning).where(ReferralEarning.user_id == user.id))
             await db.execute(delete(ReferralEarning).where(ReferralEarning.referral_id == user.id))
+
+            # Обнуляем transaction_id во всех таблицах платежей перед удалением транзакций
+            payment_models = [
+                YooKassaPayment,
+                CryptoBotPayment,
+                HeleketPayment,
+                MulenPayPayment,
+                Pal24Payment,
+                WataPayment,
+                PlategaPayment,
+                CloudPaymentsPayment,
+                FreekassaPayment,
+                KassaAiPayment,
+            ]
+            for payment_model in payment_models:
+                await db.execute(
+                    sa_update(payment_model).where(payment_model.user_id == user.id).values(transaction_id=None)
+                )
 
             await db.execute(delete(Transaction).where(Transaction.user_id == user.id))
 
@@ -774,12 +820,11 @@ async def process_rules_accept(callback: types.CallbackQuery, state: FSMContext,
 
             try:
                 await callback.message.edit_text(rules_required_text, reply_markup=get_rules_keyboard(language))
-            except Exception as e:
-                logger.error(f'Ошибка при показе сообщения об отклонении правил: {e}')
-                try:
-                    await callback.message.edit_text(rules_required_text, reply_markup=get_rules_keyboard(language))
-                except:
-                    pass
+            except TelegramBadRequest as e:
+                if 'message is not modified' in str(e):
+                    pass  # Сообщение уже содержит нужный текст
+                else:
+                    logger.error(f'Ошибка при показе сообщения об отклонении правил: {e}')
 
         logger.info(f'✅ Правила обработаны для пользователя {callback.from_user.id}')
 
@@ -886,14 +931,11 @@ async def process_privacy_policy_accept(callback: types.CallbackQuery, state: FS
                 await callback.message.edit_text(
                     privacy_policy_required_text, reply_markup=get_privacy_policy_keyboard(language)
                 )
+            except TelegramBadRequest as e:
+                if 'message is not modified' not in str(e):
+                    logger.warning(f'Ошибка при показе сообщения об отклонении политики: {e}')
             except Exception as e:
-                logger.error(f'Ошибка при показе сообщения об отклонении политики конфиденциальности: {e}')
-                try:
-                    await callback.message.edit_text(
-                        privacy_policy_required_text, reply_markup=get_privacy_policy_keyboard(language)
-                    )
-                except:
-                    pass
+                logger.warning(f'Ошибка при показе сообщения об отклонении политики: {e}')
 
         logger.info(f'✅ Политика конфиденциальности обработана для пользователя {callback.from_user.id}')
 
@@ -989,25 +1031,6 @@ async def process_referral_code_skip(callback: types.CallbackQuery, state: FSMCo
 
 async def complete_registration_from_callback(callback: types.CallbackQuery, state: FSMContext, db: AsyncSession):
     logger.info(f'🎯 COMPLETE: Завершение регистрации для пользователя {callback.from_user.id}')
-
-    # Проверяем, находится ли пользователь в черном списке
-    is_blacklisted, blacklist_reason = await blacklist_service.is_user_blacklisted(
-        callback.from_user.id, callback.from_user.username
-    )
-
-    if is_blacklisted:
-        logger.warning(f'🚫 Пользователь {callback.from_user.id} находится в черном списке: {blacklist_reason}')
-        try:
-            await callback.message.answer(
-                f'🚫 Регистрация невозможна\n\n'
-                f'Причина: {blacklist_reason}\n\n'
-                f'Если вы считаете, что это ошибка, обратитесь в поддержку.'
-            )
-        except Exception as e:
-            logger.error(f'Ошибка при отправке сообщения о блокировке: {e}')
-
-        await state.clear()
-        return
 
     existing_user = await get_user_by_telegram_id(db, callback.from_user.id)
 
@@ -1167,6 +1190,12 @@ async def complete_registration_from_callback(callback: types.CallbackQuery, sta
             refresh_subscription_error,
         )
 
+    # ИСПРАВЛЕНИЕ БАГА: Очищаем Redis payload после успешной регистрации
+    await delete_pending_payload_from_redis(callback.from_user.id)
+    logger.info(
+        '🗑️ COMPLETE_FROM_CALLBACK: Redis payload удален после успешной регистрации пользователя %s', user.telegram_id
+    )
+
     await state.clear()
 
     if campaign_message:
@@ -1196,6 +1225,20 @@ async def complete_registration_from_callback(callback: types.CallbackQuery, sta
             )
             logger.info(f'✅ Приветственное сообщение отправлено пользователю {user.telegram_id}')
             await _send_pinned_message(callback.bot, db, user)
+        except TelegramBadRequest as e:
+            if 'parse entities' in str(e).lower() or "can't parse" in str(e).lower():
+                logger.warning(f'HTML parse error в приветственном сообщении, повтор без parse_mode: {e}')
+                try:
+                    await callback.message.answer(
+                        offer_text,
+                        reply_markup=get_post_registration_keyboard(user.language),
+                        parse_mode=None,
+                    )
+                    await _send_pinned_message(callback.bot, db, user)
+                except Exception as fallback_err:
+                    logger.error(f'Ошибка при повторной отправке приветственного сообщения: {fallback_err}')
+            else:
+                logger.error(f'Ошибка при отправке приветственного сообщения: {e}')
         except Exception as e:
             logger.error(f'Ошибка при отправке приветственного сообщения: {e}')
     else:
@@ -1252,25 +1295,6 @@ async def complete_registration_from_callback(callback: types.CallbackQuery, sta
 
 async def complete_registration(message: types.Message, state: FSMContext, db: AsyncSession):
     logger.info(f'🎯 COMPLETE: Завершение регистрации для пользователя {message.from_user.id}')
-
-    # Проверяем, находится ли пользователь в черном списке
-    is_blacklisted, blacklist_reason = await blacklist_service.is_user_blacklisted(
-        message.from_user.id, message.from_user.username
-    )
-
-    if is_blacklisted:
-        logger.warning(f'🚫 Пользователь {message.from_user.id} находится в черном списке: {blacklist_reason}')
-        try:
-            await message.answer(
-                f'🚫 Регистрация невозможна\n\n'
-                f'Причина: {blacklist_reason}\n\n'
-                f'Если вы считаете, что это ошибка, обратитесь в поддержку.'
-            )
-        except Exception as e:
-            logger.error(f'Ошибка при отправке сообщения о блокировке: {e}')
-
-        await state.clear()
-        return
 
     existing_user = await get_user_by_telegram_id(db, message.from_user.id)
 
@@ -1454,6 +1478,10 @@ async def complete_registration(message: types.Message, state: FSMContext, db: A
             refresh_subscription_error,
         )
 
+    # ИСПРАВЛЕНИЕ БАГА: Очищаем Redis payload после успешной регистрации
+    await delete_pending_payload_from_redis(message.from_user.id)
+    logger.info('🗑️ COMPLETE: Redis payload удален после успешной регистрации пользователя %s', user.telegram_id)
+
     await state.clear()
 
     if campaign_message:
@@ -1477,12 +1505,33 @@ async def complete_registration(message: types.Message, state: FSMContext, db: A
 
     if offer_text and not skip_welcome_offer:
         try:
+            # Если у пользователя уже есть подписка (например, от промокода), не предлагаем триал
+            user_has_subscription = user.subscription and getattr(user.subscription, 'is_active', False)
+            if user_has_subscription:
+                keyboard = get_back_keyboard(user.language, callback_data='back_to_menu')
+            else:
+                keyboard = get_post_registration_keyboard(user.language)
+
             await message.answer(
                 offer_text,
-                reply_markup=get_post_registration_keyboard(user.language),
+                reply_markup=keyboard,
             )
             logger.info(f'✅ Приветственное сообщение отправлено пользователю {user.telegram_id}')
             await _send_pinned_message(message.bot, db, user)
+        except TelegramBadRequest as e:
+            if 'parse entities' in str(e).lower() or "can't parse" in str(e).lower():
+                logger.warning(f'HTML parse error в приветственном сообщении, повтор без parse_mode: {e}')
+                try:
+                    await message.answer(
+                        offer_text,
+                        reply_markup=keyboard,
+                        parse_mode=None,
+                    )
+                    await _send_pinned_message(message.bot, db, user)
+                except Exception as fallback_err:
+                    logger.error(f'Ошибка при повторной отправке приветственного сообщения: {fallback_err}')
+            else:
+                logger.error(f'Ошибка при отправке приветственного сообщения: {e}')
         except Exception as e:
             logger.error(f'Ошибка при отправке приветственного сообщения: {e}')
     else:
@@ -1711,6 +1760,8 @@ async def get_main_menu_text_simple(user_name, texts, db: AsyncSession):
 async def required_sub_channel_check(
     query: types.CallbackQuery, bot: Bot, state: FSMContext, db: AsyncSession, db_user=None
 ):
+    from app.utils.message_patch import _cache_logo_file_id, get_logo_media
+
     language = DEFAULT_LANGUAGE
     texts = get_texts(language)
 
@@ -1725,6 +1776,7 @@ async def required_sub_channel_check(
             redis_payload = await get_pending_payload_from_redis(query.from_user.id)
             if redis_payload:
                 pending_start_payload = redis_payload
+                state_data['pending_start_payload'] = redis_payload
                 logger.info(
                     "📦 CHANNEL CHECK: Payload '%s' восстановлен из Redis (fallback)",
                     pending_start_payload,
@@ -1780,16 +1832,31 @@ async def required_sub_channel_check(
                 only_active=True,
             )
 
-            if campaign:
-                state_data['campaign_id'] = campaign.id
-                logger.info(
-                    '📣 CHANNEL CHECK: Кампания %s восстановлена из payload',
-                    campaign.id,
+            # Обрабатываем payload только если ещё не обработан
+            # (проверяем по наличию referral_code или campaign_id в state)
+            if not state_data.get('referral_code') and not state_data.get('campaign_id'):
+                campaign = await get_campaign_by_start_parameter(
+                    db,
+                    pending_start_payload,
+                    only_active=True,
                 )
+
+                if campaign:
+                    state_data['campaign_id'] = campaign.id
+                    logger.info(
+                        '📣 CHANNEL CHECK: Кампания %s восстановлена из payload',
+                        campaign.id,
+                    )
+                else:
+                    state_data['referral_code'] = pending_start_payload
+                    logger.info(
+                        '🎯 CHANNEL CHECK: Payload интерпретирован как реферальный код: %s',
+                        pending_start_payload,
+                    )
             else:
-                state_data['referral_code'] = pending_start_payload
                 logger.info(
-                    '🎯 CHANNEL CHECK: Payload интерпретирован как реферальный код',
+                    '✅ CHANNEL CHECK: Реферальный код уже сохранен в state: %s',
+                    state_data.get('referral_code') or f'campaign_id={state_data.get("campaign_id")}',
                 )
 
             await state.set_data(state_data)
@@ -1829,14 +1896,16 @@ async def required_sub_channel_check(
         except Exception as e:
             logger.warning(f'Не удалось удалить сообщение: {e}')
 
+        # ИСПРАВЛЕНИЕ БАГА: Очищаем Redis payload ТОЛЬКО после успешной проверки подписки
+        # и перед показом главного меню или завершением регистрации
+        if pending_start_payload:
+            await delete_pending_payload_from_redis(query.from_user.id)
+            logger.info('🗑️ CHANNEL CHECK: Redis payload удален после успешной проверки подписки')
+
         if user and user.status != UserStatus.DELETED.value:
             has_active_subscription, subscription_is_active = _calculate_subscription_flags(user.subscription)
 
             menu_text = await get_main_menu_text(user, texts, db)
-
-            from aiogram.types import FSInputFile
-
-            from app.utils.message_patch import LOGO_PATH
 
             is_admin = settings.is_admin(user.telegram_id)
             is_moderator = (not is_admin) and SupportSettingsService.is_moderator(user.telegram_id)
@@ -1863,13 +1932,14 @@ async def required_sub_channel_check(
             )
 
             if settings.ENABLE_LOGO_MODE:
-                await bot.send_photo(
+                _result = await bot.send_photo(
                     chat_id=query.from_user.id,
-                    photo=FSInputFile(LOGO_PATH),
+                    photo=get_logo_media(),
                     caption=menu_text,
                     reply_markup=keyboard,
                     parse_mode='HTML',
                 )
+                _cache_logo_file_id(_result)
             else:
                 await bot.send_message(
                     chat_id=query.from_user.id,
@@ -1911,6 +1981,11 @@ async def required_sub_channel_check(
                     )
                     await db.refresh(user, ['subscription'])
 
+                    # ИСПРАВЛЕНИЕ БАГА: Очищаем pending_start_payload из state после создания пользователя
+                    state_data.pop('pending_start_payload', None)
+                    await state.set_data(state_data)
+                    logger.info('✅ CHANNEL CHECK: pending_start_payload удален из state после создания пользователя')
+
                     # Обрабатываем реферальную регистрацию
                     if referrer_id:
                         try:
@@ -1923,10 +1998,6 @@ async def required_sub_channel_check(
                     has_active_subscription, subscription_is_active = _calculate_subscription_flags(user.subscription)
 
                     menu_text = await get_main_menu_text(user, texts, db)
-
-                    from aiogram.types import FSInputFile
-
-                    from app.utils.message_patch import LOGO_PATH
 
                     is_admin = settings.is_admin(user.telegram_id)
                     is_moderator = (not is_admin) and SupportSettingsService.is_moderator(user.telegram_id)
@@ -1953,13 +2024,14 @@ async def required_sub_channel_check(
                     )
 
                     if settings.ENABLE_LOGO_MODE:
-                        await bot.send_photo(
+                        _result = await bot.send_photo(
                             chat_id=query.from_user.id,
-                            photo=FSInputFile(LOGO_PATH),
+                            photo=get_logo_media(),
                             caption=menu_text,
                             reply_markup=keyboard,
                             parse_mode='HTML',
                         )
+                        _cache_logo_file_id(_result)
                     else:
                         await bot.send_message(
                             chat_id=query.from_user.id,
@@ -1979,19 +2051,16 @@ async def required_sub_channel_check(
                     )
                     await state.set_state(RegistrationStates.waiting_for_referral_code)
             else:
-                from aiogram.types import FSInputFile
-
-                from app.utils.message_patch import LOGO_PATH
-
                 rules_text = await get_rules(language)
 
                 if settings.ENABLE_LOGO_MODE:
-                    await bot.send_photo(
+                    _result = await bot.send_photo(
                         chat_id=query.from_user.id,
-                        photo=FSInputFile(LOGO_PATH),
+                        photo=get_logo_media(),
                         caption=rules_text,
                         reply_markup=get_rules_keyboard(language),
                     )
+                    _cache_logo_file_id(_result)
                 else:
                     await bot.send_message(
                         chat_id=query.from_user.id,
@@ -2000,9 +2069,22 @@ async def required_sub_channel_check(
                     )
                 await state.set_state(RegistrationStates.waiting_for_rules_accept)
 
+    except TelegramBadRequest as e:
+        error_msg = str(e).lower()
+        if 'query is too old' in error_msg or 'query id is invalid' in error_msg:
+            logger.debug('Устаревший callback в required_sub_channel_check, игнорируем')
+        else:
+            logger.error(f'Ошибка Telegram API в required_sub_channel_check: {e}')
+            try:
+                await query.answer(f'{texts.ERROR}!', show_alert=True)
+            except Exception:
+                pass
     except Exception as e:
         logger.error(f'Ошибка в required_sub_channel_check: {e}')
-        await query.answer(f'{texts.ERROR}!', show_alert=True)
+        try:
+            await query.answer(f'{texts.ERROR}!', show_alert=True)
+        except Exception:
+            pass
 
 
 def register_handlers(dp: Dispatcher):

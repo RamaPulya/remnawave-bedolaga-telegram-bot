@@ -22,6 +22,7 @@ from app.keyboards.inline import (
 from app.localization.texts import get_texts
 from app.services.remnawave_service import RemnaWaveService
 from app.services.subscription_service import SubscriptionService
+from app.services.user_cart_service import user_cart_service
 from app.utils.pagination import paginate_list
 from app.utils.pricing_utils import (
     apply_percentage_discount,
@@ -185,18 +186,29 @@ async def handle_change_devices(callback: types.CallbackQuery, db_user: User, db
     if tariff:
         price_per_device = tariff_device_price
         price_text = texts.format_price(price_per_device)
+        tariff_min_devices = getattr(tariff, 'device_limit', 1) or 1
+
+        # Добавляем информацию о минимальном лимите если он больше 1
+        min_devices_info = ''
+        if tariff_min_devices > 1:
+            min_devices_info = texts.t(
+                'CHANGE_DEVICES_MIN_LIMIT_INFO',
+                '\nМинимум для тарифа: {min_devices} устройств\n',
+            ).format(min_devices=tariff_min_devices)
+
         prompt_text = texts.t(
             'CHANGE_DEVICES_PROMPT_TARIFF',
             (
                 '📱 <b>Изменение количества устройств</b>\n\n'
                 'Текущий лимит: {current_devices} устройств\n'
                 'Цена за доп. устройство: {price}/мес\n'
+                '{min_devices_info}'
                 'Выберите новое количество устройств:\n\n'
                 '💡 <b>Важно:</b>\n'
                 '• При увеличении - доплата пропорционально оставшемуся времени\n'
                 '• При уменьшении - возврат средств не производится'
             ),
-        ).format(current_devices=current_devices, price=price_text)
+        ).format(current_devices=current_devices, price=price_text, min_devices_info=min_devices_info)
     else:
         prompt_text = texts.t(
             'CHANGE_DEVICES_PROMPT',
@@ -275,6 +287,18 @@ async def confirm_change_devices(callback: types.CallbackQuery, db_user: User, d
         )
         return
 
+    # Проверяем минимальное количество устройств на тарифе
+    tariff_min_devices = (getattr(tariff, 'device_limit', 1) or 1) if tariff else 1
+    if new_devices_count < tariff_min_devices:
+        await callback.answer(
+            texts.t(
+                'DEVICES_MIN_LIMIT_REACHED',
+                '⚠️ Минимальное количество устройств для вашего тарифа: {limit}',
+            ).format(limit=tariff_min_devices),
+            show_alert=True,
+        )
+        return
+
     devices_difference = new_devices_count - current_devices
 
     if devices_difference > 0:
@@ -290,26 +314,54 @@ async def confirm_change_devices(callback: types.CallbackQuery, db_user: User, d
             chargeable_devices = additional_devices
 
         devices_price_per_month = chargeable_devices * price_per_device
-        months_hint = get_remaining_months(subscription.end_date)
-        period_hint_days = months_hint * 30 if months_hint > 0 else None
-        devices_discount_percent = _get_addon_discount_percent_for_user(
-            db_user,
-            'devices',
-            period_hint_days,
-        )
-        discounted_per_month, discount_per_month = apply_percentage_discount(
-            devices_price_per_month,
-            devices_discount_percent,
-        )
-        price, charged_months = calculate_prorated_price(
-            discounted_per_month,
-            subscription.end_date,
-        )
-        total_discount = discount_per_month * charged_months
+
+        # Проверяем является ли тариф суточным
+        is_daily_tariff = tariff and getattr(tariff, 'is_daily', False)
+
+        if is_daily_tariff:
+            # Для суточных тарифов считаем по дням (как в кабинете)
+            now = datetime.utcnow()
+            days_left = max(1, (subscription.end_date - now).days)
+            period_hint_days = days_left
+
+            devices_discount_percent = _get_addon_discount_percent_for_user(
+                db_user,
+                'devices',
+                period_hint_days,
+            )
+            discounted_per_month, discount_per_month = apply_percentage_discount(
+                devices_price_per_month,
+                devices_discount_percent,
+            )
+            # Цена = месячная_цена * days_left / 30
+            price = int(discounted_per_month * days_left / 30)
+            price = max(100, price)  # Минимум 1 рубль
+            total_discount = int(discount_per_month * days_left / 30)
+            period_label = f'{days_left} дн.' if days_left > 1 else '1 день'
+        else:
+            # Для обычных тарифов - по месяцам
+            months_hint = get_remaining_months(subscription.end_date)
+            period_hint_days = months_hint * 30 if months_hint > 0 else None
+
+            devices_discount_percent = _get_addon_discount_percent_for_user(
+                db_user,
+                'devices',
+                period_hint_days,
+            )
+            discounted_per_month, discount_per_month = apply_percentage_discount(
+                devices_price_per_month,
+                devices_discount_percent,
+            )
+            price, charged_months = calculate_prorated_price(
+                discounted_per_month,
+                subscription.end_date,
+            )
+            total_discount = discount_per_month * charged_months
+            period_label = f'{charged_months} мес'
 
         if price > 0 and db_user.balance_kopeks < price:
             missing_kopeks = price - db_user.balance_kopeks
-            required_text = f'{texts.format_price(price)} (за {charged_months} мес)'
+            required_text = f'{texts.format_price(price)} (за {period_label})'
             message_text = texts.t(
                 'ADDON_INSUFFICIENT_FUNDS_MESSAGE',
                 (
@@ -325,11 +377,28 @@ async def confirm_change_devices(callback: types.CallbackQuery, db_user: User, d
                 missing=texts.format_price(missing_kopeks),
             )
 
+            # Сохраняем корзину для автопокупки после пополнения баланса
+            await user_cart_service.save_user_cart(
+                user_id=db_user.id,
+                cart_data={
+                    'cart_mode': 'add_devices',
+                    'devices_to_add': devices_difference,
+                    'price_kopeks': price,
+                },
+            )
+            logger.info(
+                'Сохранена корзина add_devices для пользователя %s: +%s устройств, цена %s коп.',
+                db_user.telegram_id,
+                devices_difference,
+                price,
+            )
+
             await callback.message.answer(
                 message_text,
                 reply_markup=get_insufficient_balance_keyboard(
                     db_user.language,
                     amount_kopeks=missing_kopeks,
+                    has_saved_cart=True,
                 ),
                 parse_mode='HTML',
             )
@@ -343,10 +412,11 @@ async def confirm_change_devices(callback: types.CallbackQuery, db_user: User, d
         if price > 0:
             cost_text = texts.t(
                 'DEVICE_CHANGE_EXTRA_COST',
-                'Доплата: {amount} (за {months} мес)',
+                'Доплата: {amount} (за {period})',
             ).format(
                 amount=texts.format_price(price),
-                months=charged_months,
+                period=period_label,
+                months=period_label,
             )
             if total_discount > 0:
                 cost_text += texts.t(
@@ -427,9 +497,37 @@ async def execute_change_devices(callback: types.CallbackQuery, db_user: User, d
     subscription = db_user.subscription
     current_devices = subscription.device_limit
 
-    if not settings.is_devices_selection_enabled():
+    # Проверяем тариф подписки
+    tariff = None
+    if subscription.tariff_id:
+        from app.database.crud.tariff import get_tariff_by_id
+
+        tariff = await get_tariff_by_id(db, subscription.tariff_id)
+
+    # Для тарифов - проверяем разрешено ли изменение устройств
+    if tariff:
+        tariff_device_price = getattr(tariff, 'device_price_kopeks', None)
+        if tariff_device_price is None or tariff_device_price <= 0:
+            await callback.answer(
+                texts.t('TARIFF_DEVICES_DISABLED', '⚠️ Изменение устройств недоступно для вашего тарифа'),
+                show_alert=True,
+            )
+            return
+    elif not settings.is_devices_selection_enabled():
         await callback.answer(
             texts.t('DEVICES_SELECTION_DISABLED', '⚠️ Изменение количества устройств недоступно'),
+            show_alert=True,
+        )
+        return
+
+    # Проверяем минимальное количество устройств на тарифе
+    tariff_min_devices = (getattr(tariff, 'device_limit', 1) or 1) if tariff else 1
+    if new_devices_count < tariff_min_devices:
+        await callback.answer(
+            texts.t(
+                'DEVICES_MIN_LIMIT_REACHED',
+                '⚠️ Минимальное количество устройств для вашего тарифа: {limit}',
+            ).format(limit=tariff_min_devices),
             show_alert=True,
         )
         return
@@ -464,7 +562,7 @@ async def execute_change_devices(callback: types.CallbackQuery, db_user: User, d
         subscription_service = SubscriptionService()
         await subscription_service.update_remnawave_user(db, subscription)
 
-        # При уменьшении лимита - сбросить лишние устройства
+        # При уменьшении лимита - удалить лишние устройства (последние подключённые)
         devices_reset_count = 0
         if new_devices_count < current_devices and db_user.remnawave_uuid:
             try:
@@ -475,16 +573,34 @@ async def execute_change_devices(callback: types.CallbackQuery, db_user: User, d
                         devices_list = response['response'].get('devices', [])
                         connected_count = len(devices_list)
 
-                        # Если подключённых устройств больше чем новый лимит - сбросить все
+                        # Если подключённых устройств больше чем новый лимит - удалить лишние
                         if connected_count > new_devices_count:
+                            devices_to_remove = connected_count - new_devices_count
                             logger.info(
-                                f'🔧 Сброс устройств при уменьшении лимита: '
-                                f'подключено {connected_count}, новый лимит {new_devices_count}'
+                                f'🔧 Удаление лишних устройств при уменьшении лимита: '
+                                f'подключено {connected_count}, новый лимит {new_devices_count}, '
+                                f'удаляем {devices_to_remove}'
                             )
-                            await api.reset_user_devices(db_user.remnawave_uuid)
-                            devices_reset_count = connected_count
+
+                            # Сортируем по дате (последние в конце) и удаляем последние
+                            sorted_devices = sorted(
+                                devices_list,
+                                key=lambda d: d.get('updatedAt') or d.get('createdAt') or '',
+                            )
+                            devices_to_delete = sorted_devices[-devices_to_remove:]
+
+                            for device in devices_to_delete:
+                                device_hwid = device.get('hwid')
+                                if device_hwid:
+                                    try:
+                                        delete_data = {'userUuid': db_user.remnawave_uuid, 'hwid': device_hwid}
+                                        await api._make_request('POST', '/api/hwid/devices/delete', data=delete_data)
+                                        devices_reset_count += 1
+                                        logger.info(f'✅ Удалено устройство {device_hwid}')
+                                    except Exception as del_error:
+                                        logger.error(f'Ошибка удаления устройства {device_hwid}: {del_error}')
             except Exception as reset_error:
-                logger.error(f'Ошибка сброса устройств при уменьшении лимита: {reset_error}')
+                logger.error(f'Ошибка удаления устройств при уменьшении лимита: {reset_error}')
 
         await db.refresh(db_user)
         await db.refresh(subscription)
@@ -524,9 +640,9 @@ async def execute_change_devices(callback: types.CallbackQuery, db_user: User, d
             ).format(old=current_devices, new=new_devices_count)
             if devices_reset_count > 0:
                 success_text += texts.t(
-                    'DEVICE_CHANGE_DEVICES_RESET',
-                    '\n🔄 Сброшено устройств: {count}\n💡 Подключите заново нужные устройства (до {limit} шт.)\n\n',
-                ).format(count=devices_reset_count, limit=new_devices_count)
+                    'DEVICE_CHANGE_DEVICES_REMOVED',
+                    '\n🗑 Удалено устройств: {count}\n',
+                ).format(count=devices_reset_count)
             success_text += texts.t(
                 'DEVICE_CHANGE_NO_REFUND_INFO',
                 'ℹ️ Возврат средств не производится',
@@ -949,35 +1065,63 @@ async def confirm_add_devices(callback: types.CallbackQuery, db_user: User, db: 
         return
 
     devices_price_per_month = devices_count * price_per_device
-    months_hint = get_remaining_months(subscription.end_date)
-    period_hint_days = months_hint * 30 if months_hint > 0 else None
-    devices_discount_percent = _get_addon_discount_percent_for_user(
-        db_user,
-        'devices',
-        period_hint_days,
-    )
-    discounted_per_month, discount_per_month = apply_percentage_discount(
-        devices_price_per_month,
-        devices_discount_percent,
-    )
-    price, charged_months = calculate_prorated_price(
-        discounted_per_month,
-        subscription.end_date,
-    )
-    total_discount = discount_per_month * charged_months
+
+    # Проверяем является ли тариф суточным
+    is_daily_tariff = tariff and getattr(tariff, 'is_daily', False)
+
+    if is_daily_tariff:
+        # Для суточных тарифов считаем по дням (как в кабинете)
+        now = datetime.utcnow()
+        days_left = max(1, (subscription.end_date - now).days)
+        period_hint_days = days_left
+
+        devices_discount_percent = _get_addon_discount_percent_for_user(
+            db_user,
+            'devices',
+            period_hint_days,
+        )
+        discounted_per_month, discount_per_month = apply_percentage_discount(
+            devices_price_per_month,
+            devices_discount_percent,
+        )
+        # Цена = месячная_цена * days_left / 30
+        price = int(discounted_per_month * days_left / 30)
+        price = max(100, price)  # Минимум 1 рубль
+        total_discount = int(discount_per_month * days_left / 30)
+        period_label = f'{days_left} дн.' if days_left > 1 else '1 день'
+    else:
+        # Для обычных тарифов - по месяцам
+        months_hint = get_remaining_months(subscription.end_date)
+        period_hint_days = months_hint * 30 if months_hint > 0 else None
+
+        devices_discount_percent = _get_addon_discount_percent_for_user(
+            db_user,
+            'devices',
+            period_hint_days,
+        )
+        discounted_per_month, discount_per_month = apply_percentage_discount(
+            devices_price_per_month,
+            devices_discount_percent,
+        )
+        price, charged_months = calculate_prorated_price(
+            discounted_per_month,
+            subscription.end_date,
+        )
+        total_discount = discount_per_month * charged_months
+        period_label = f'{charged_months} мес'
 
     logger.info(
-        'Добавление %s устройств: %.2f₽/мес × %s мес = %.2f₽ (скидка %.2f₽)',
+        'Добавление %s устройств: %.2f₽/мес × %s = %.2f₽ (скидка %.2f₽)',
         devices_count,
         discounted_per_month / 100,
-        charged_months,
+        period_label,
         price / 100,
         total_discount / 100,
     )
 
     if db_user.balance_kopeks < price:
         missing_kopeks = price - db_user.balance_kopeks
-        required_text = f'{texts.format_price(price)} (за {charged_months} мес)'
+        required_text = f'{texts.format_price(price)} (за {period_label})'
         message_text = texts.t(
             'ADDON_INSUFFICIENT_FUNDS_MESSAGE',
             (
@@ -993,12 +1137,29 @@ async def confirm_add_devices(callback: types.CallbackQuery, db_user: User, db: 
             missing=texts.format_price(missing_kopeks),
         )
 
+        # Сохраняем корзину для автопокупки после пополнения баланса
+        await user_cart_service.save_user_cart(
+            user_id=db_user.id,
+            cart_data={
+                'cart_mode': 'add_devices',
+                'devices_to_add': devices_count,
+                'price_kopeks': price,
+            },
+        )
+        logger.info(
+            'Сохранена корзина add_devices для пользователя %s: +%s устройств, цена %s коп.',
+            db_user.telegram_id,
+            devices_count,
+            price,
+        )
+
         await callback.message.edit_text(
             message_text,
             reply_markup=get_insufficient_balance_keyboard(
                 db_user.language,
                 resume_callback=resume_callback,
                 amount_kopeks=missing_kopeks,
+                has_saved_cart=True,
             ),
             parse_mode='HTML',
         )
@@ -1007,7 +1168,7 @@ async def confirm_add_devices(callback: types.CallbackQuery, db_user: User, db: 
 
     try:
         success = await subtract_user_balance(
-            db, db_user, price, f'Добавление {devices_count} устройств на {charged_months} мес'
+            db, db_user, price, f'Добавление {devices_count} устройств на {period_label}'
         )
 
         if not success:
@@ -1024,18 +1185,30 @@ async def confirm_add_devices(callback: types.CallbackQuery, db_user: User, db: 
             user_id=db_user.id,
             type=TransactionType.SUBSCRIPTION_PAYMENT,
             amount_kopeks=price,
-            description=f'Добавление {devices_count} устройств на {charged_months} мес',
+            description=f'Добавление {devices_count} устройств на {period_label}',
         )
 
         await db.refresh(db_user)
         await db.refresh(subscription)
+
+        # Отправляем уведомление админам о докупке устройств
+        try:
+            from app.services.admin_notification_service import AdminNotificationService
+
+            notification_service = AdminNotificationService(callback.bot)
+            old_device_limit = subscription.device_limit - devices_count
+            await notification_service.send_subscription_update_notification(
+                db, db_user, subscription, 'devices', old_device_limit, subscription.device_limit, price
+            )
+        except Exception as e:
+            logger.error(f'Ошибка отправки уведомления о докупке устройств: {e}')
 
         success_text = (
             '✅ Устройства успешно добавлены!\n\n'
             f'📱 Добавлено: {devices_count} устройств\n'
             f'Новый лимит: {subscription.device_limit} устройств\n'
         )
-        success_text += f'💰 Списано: {texts.format_price(price)} (за {charged_months} мес)'
+        success_text += f'💰 Списано: {texts.format_price(price)} (за {period_label})'
         if total_discount > 0:
             success_text += f' (скидка {devices_discount_percent}%: -{texts.format_price(total_discount)})'
 

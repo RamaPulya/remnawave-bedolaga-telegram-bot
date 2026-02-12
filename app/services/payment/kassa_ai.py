@@ -14,7 +14,6 @@ from app.config import settings
 from app.database.models import PaymentMethod, TransactionType
 from app.services.kassa_ai_service import kassa_ai_service
 from app.services.subscription_auto_purchase_service import (
-    auto_activate_subscription_after_topup,
     auto_purchase_saved_cart_after_topup,
 )
 from app.utils.payment_logger import payment_logger as logger
@@ -69,8 +68,13 @@ class KassaAiPaymentMixin:
             )
             return None
 
-        # Генерируем уникальный order_id
-        order_id = f'kai_{user_id}_{uuid.uuid4().hex[:12]}'
+        # Получаем telegram_id пользователя для order_id
+        payment_module = import_module('app.services.payment_service')
+        user = await payment_module.get_user_by_id(db, user_id)
+        tg_id = user.telegram_id if user else user_id
+
+        # Генерируем уникальный order_id с telegram_id для удобного поиска
+        order_id = f'k{tg_id}_{uuid.uuid4().hex[:6]}'
         amount_rubles = amount_kopeks / 100
         currency = settings.KASSA_AI_CURRENCY
 
@@ -268,6 +272,7 @@ class KassaAiPaymentMixin:
             payment_method=PaymentMethod.KASSA_AI,
             external_id=str(intid) if intid else payment.order_id,
             is_completed=True,
+            created_at=getattr(payment, 'created_at', None),
         )
 
         # Связываем платеж с транзакцией
@@ -334,34 +339,14 @@ class KassaAiPaymentMixin:
             try:
                 display_name = settings.get_kassa_ai_display_name()
 
-                if settings.SHOW_ACTIVATION_PROMPT_AFTER_TOPUP:
-                    # Яркое сообщение для тупых
-                    from aiogram import types
-
-                    message = (
-                        '✅ <b>Платеж успешно завершен!</b>\n\n'
-                        f'💰 Сумма: {settings.format_price(payment.amount_kopeks)}\n'
-                        f'💳 Способ: {display_name}\n\n'
-                        '💎 Средства зачислены на ваш баланс!\n\n'
-                        '‼️ <b>ВНИМАНИЕ! ОБЯЗАТЕЛЬНО АКТИВИРУЙТЕ ПОДПИСКУ!</b> ‼️\n\n'
-                        '⚠️ Пополнение баланса <b>НЕ АКТИВИРУЕТ</b> подписку автоматически!\n\n'
-                        '👇 <b>НАЖМИТЕ КНОПКУ НИЖЕ ДЛЯ АКТИВАЦИИ</b> 👇'
-                    )
-                    keyboard = types.InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [types.InlineKeyboardButton(text='🔥 АКТИВИРОВАТЬ ПОДПИСКУ', callback_data='menu_buy')],
-                        ]
-                    )
-                else:
-                    # Стандартное сообщение (как было раньше)
-                    keyboard = await self.build_topup_success_keyboard(user)
-                    message = (
-                        '✅ <b>Пополнение успешно!</b>\n\n'
-                        f'💰 Сумма: {settings.format_price(payment.amount_kopeks)}\n'
-                        f'💳 Способ: {display_name}\n'
-                        f'🆔 Транзакция: {transaction.id}\n\n'
-                        'Баланс пополнен автоматически!'
-                    )
+                keyboard = await self.build_topup_success_keyboard(user)
+                message = (
+                    '✅ <b>Пополнение успешно!</b>\n\n'
+                    f'💰 Сумма: {settings.format_price(payment.amount_kopeks)}\n'
+                    f'💳 Способ: {display_name}\n'
+                    f'🆔 Транзакция: {transaction.id}\n\n'
+                    'Баланс пополнен автоматически!'
+                )
 
                 await self.bot.send_message(
                     user.telegram_id,
@@ -399,23 +384,7 @@ class KassaAiPaymentMixin:
                 if auto_purchase_success:
                     has_saved_cart = False
 
-            # Умная автоактивация если автопокупка не сработала
-            activation_notification_sent = False
-            if not auto_purchase_success:
-                try:
-                    _, activation_notification_sent = await auto_activate_subscription_after_topup(
-                        db, user, bot=getattr(self, 'bot', None), topup_amount=payment.amount_kopeks
-                    )
-                except Exception as auto_activate_error:
-                    logger.error(
-                        'Ошибка умной автоактивации для пользователя %s: %s',
-                        user.id,
-                        auto_activate_error,
-                        exc_info=True,
-                    )
-
-            # Отправляем уведомление только если его ещё не отправили
-            if has_saved_cart and getattr(self, 'bot', None) and not activation_notification_sent and user.telegram_id:
+            if has_saved_cart and getattr(self, 'bot', None) and user.telegram_id:
                 from app.localization.texts import get_texts
 
                 texts = get_texts(user.language)
@@ -487,3 +456,91 @@ class KassaAiPaymentMixin:
         except Exception as e:
             logger.exception('KassaAI: ошибка проверки статуса: %s', e)
             return None
+
+    async def get_kassa_ai_payment_status(
+        self,
+        db: AsyncSession,
+        local_payment_id: int,
+    ) -> dict[str, Any] | None:
+        """
+        Проверяет статус платежа KassaAI по локальному ID через API.
+        Если платёж оплачен — автоматически начисляет баланс.
+        """
+        logger.info('KassaAI: checking payment status for id=%s', local_payment_id)
+        kassa_ai_crud = import_module('app.database.crud.kassa_ai')
+
+        payment = await kassa_ai_crud.get_kassa_ai_payment_by_id(db, local_payment_id)
+        if not payment:
+            logger.warning('KassaAI payment not found: id=%s', local_payment_id)
+            return None
+
+        if payment.is_paid:
+            return {
+                'payment': payment,
+                'status': 'success',
+                'is_paid': True,
+            }
+
+        if not settings.KASSA_AI_API_KEY:
+            return {
+                'payment': payment,
+                'status': payment.status or 'pending',
+                'is_paid': payment.is_paid,
+            }
+
+        try:
+            # Запрашиваем статус заказа в KassaAI (api.fk.life)
+            response = await kassa_ai_service.get_order_status(payment.order_id)
+
+            # KassaAI возвращает список заказов (как Freekassa)
+            orders = response.get('orders', [])
+            target_order = None
+
+            # Ищем наш заказ в списке
+            for order in orders:
+                order_key = str(order.get('merchant_order_id') or order.get('paymentId'))
+                if order_key == str(payment.order_id):
+                    target_order = order
+                    break
+
+            if target_order:
+                # Статус 1 = Оплачен (как в Freekassa)
+                kai_status = int(target_order.get('status', 0))
+
+                if kai_status == 1:
+                    logger.info('KassaAI payment %s confirmed via API', payment.order_id)
+
+                    callback_payload = {
+                        'check_source': 'api',
+                        'kai_order_data': target_order,
+                    }
+
+                    # ID заказа на стороне KassaAI
+                    kai_intid = str(target_order.get('fk_order_id') or target_order.get('id'))
+
+                    # Обновляем статус
+                    payment = await kassa_ai_crud.update_kassa_ai_payment_status(
+                        db=db,
+                        payment=payment,
+                        status='success',
+                        is_paid=True,
+                        kassa_ai_order_id=kai_intid,
+                        payment_system_id=int(target_order.get('curID')) if target_order.get('curID') else None,
+                        callback_payload=callback_payload,
+                    )
+
+                    # Финализируем (начисляем баланс)
+                    await self._finalize_kassa_ai_payment(
+                        db,
+                        payment,
+                        intid=kai_intid,
+                        trigger='api_check',
+                    )
+        except Exception as e:
+            logger.error('Error checking KassaAI payment status: %s', e)
+
+        return {
+            'payment': payment,
+            'status': payment.status or 'pending',
+            'is_paid': payment.is_paid,
+        }

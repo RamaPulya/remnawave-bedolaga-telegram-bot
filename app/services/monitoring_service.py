@@ -5,8 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import FSInputFile
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -61,12 +60,17 @@ from app.services.notification_settings_service import NotificationSettingsServi
 from app.services.payment_service import PaymentService
 from app.services.promo_offer_service import promo_offer_service
 from app.services.subscription_service import SubscriptionService
+from app.utils.cache import cache
 from app.utils.miniapp_buttons import build_miniapp_or_callback_button
 from app.utils.pricing_utils import apply_percentage_discount
 from app.utils.subscription_utils import (
     resolve_hwid_device_limit_for_payload,
 )
 from app.utils.timezone import format_local_datetime
+
+
+# Кулдаун между повторными уведомлениями об автоплатеже с недостаточным балансом (6 часов)
+AUTOPAY_INSUFFICIENT_BALANCE_COOLDOWN_SECONDS: int = 21600
 
 
 logger = logging.getLogger(__name__)
@@ -103,13 +107,17 @@ class MonitoringService:
 
         if settings.ENABLE_LOGO_MODE and LOGO_PATH.exists() and (text is None or len(text) <= 1000):
             try:
-                return await self.bot.send_photo(
+                from app.utils.message_patch import _cache_logo_file_id, get_logo_media
+
+                result = await self.bot.send_photo(
                     chat_id=chat_id,
-                    photo=FSInputFile(LOGO_PATH),
+                    photo=get_logo_media(),
                     caption=text,
                     reply_markup=reply_markup,
                     parse_mode=parse_mode,
                 )
+                _cache_logo_file_id(result)
+                return result
             except TelegramBadRequest as exc:
                 logger.warning(
                     'Не удалось отправить сообщение с логотипом пользователю %s: %s. Отправляем текстовое сообщение.',
@@ -254,9 +262,18 @@ class MonitoringService:
 
     async def _check_expired_subscriptions(self, db: AsyncSession):
         try:
+            from app.database.crud.subscription import is_recently_updated_by_webhook
+
             expired_subscriptions = await get_expired_subscriptions(db)
 
             for subscription in expired_subscriptions:
+                if is_recently_updated_by_webhook(subscription):
+                    logger.debug(
+                        'Пропуск expire подписки %s: обновлена вебхуком недавно',
+                        subscription.id,
+                    )
+                    continue
+
                 from app.database.crud.subscription import expire_subscription
 
                 await expire_subscription(db, subscription)
@@ -280,6 +297,15 @@ class MonitoringService:
 
     async def update_remnawave_user(self, db: AsyncSession, subscription: Subscription) -> RemnaWaveUser | None:
         try:
+            from app.database.crud.subscription import is_recently_updated_by_webhook
+
+            if is_recently_updated_by_webhook(subscription):
+                logger.debug(
+                    'Пропуск RemnaWave обновления подписки %s: обновлена вебхуком недавно',
+                    subscription.id,
+                )
+                return None
+
             user = await get_user_by_id(db, subscription.user_id)
             if not user or not user.remnawave_uuid:
                 logger.error(f'RemnaWave UUID не найден для пользователя {subscription.user_id}')
@@ -290,6 +316,14 @@ class MonitoringService:
                 await db.refresh(subscription)
             except Exception:
                 pass
+
+            # Re-check guard after refresh (webhook could have committed between first check and refresh)
+            if is_recently_updated_by_webhook(subscription):
+                logger.debug(
+                    'Пропуск RemnaWave обновления подписки %s: обновлена вебхуком недавно (после refresh)',
+                    subscription.id,
+                )
+                return None
 
             current_time = datetime.utcnow()
             is_active = subscription.status == SubscriptionStatus.ACTIVE.value and subscription.end_date > current_time
@@ -542,6 +576,8 @@ class MonitoringService:
             logger.error(f'Ошибка проверки неактивных тестовых подписок: {e}')
 
     async def _check_trial_channel_subscriptions(self, db: AsyncSession):
+        from app.database.crud.subscription import is_recently_updated_by_webhook
+
         if not settings.CHANNEL_IS_REQUIRED_SUB:
             return
 
@@ -628,6 +664,12 @@ class MonitoringService:
                     continue
 
                 if subscription.status == SubscriptionStatus.ACTIVE.value and subscription.is_trial and not is_member:
+                    if is_recently_updated_by_webhook(subscription):
+                        logger.debug(
+                            'Пропуск деактивации trial подписки %s: обновлена вебхуком недавно',
+                            subscription.id,
+                        )
+                        continue
                     subscription = await deactivate_subscription(db, subscription)
                     disabled_count += 1
                     logger.info(
@@ -662,6 +704,12 @@ class MonitoringService:
                                     'trial_channel_unsubscribed',
                                 )
                 elif subscription.status == SubscriptionStatus.DISABLED.value and subscription.is_trial and is_member:
+                    if is_recently_updated_by_webhook(subscription):
+                        logger.debug(
+                            'Пропуск реактивации trial подписки %s: обновлена вебхуком недавно',
+                            subscription.id,
+                        )
+                        continue
                     subscription.status = SubscriptionStatus.ACTIVE.value
                     subscription.updated_at = datetime.utcnow()
                     await db.commit()
@@ -966,7 +1014,8 @@ class MonitoringService:
                     selectinload(Subscription.user).options(
                         selectinload(User.promo_group),
                         selectinload(User.user_promo_groups).selectinload(UserPromoGroup.promo_group),
-                    )
+                    ),
+                    selectinload(Subscription.tariff),
                 )
                 .where(
                     and_(
@@ -980,6 +1029,16 @@ class MonitoringService:
 
             autopay_subscriptions = []
             for sub in all_autopay_subscriptions:
+                # Суточные подписки имеют свой собственный механизм продления
+                # (DailySubscriptionService), глобальный autopay на них не распространяется
+                if sub.tariff and getattr(sub.tariff, 'is_daily', False):
+                    logger.debug(
+                        'Пропускаем суточную подписку %s (тариф %s) в глобальном autopay',
+                        sub.id,
+                        sub.tariff.name,
+                    )
+                    continue
+
                 days_before_expiry = (sub.end_date - current_time).days
                 if days_before_expiry <= min(sub.autopay_days_before, 3):
                     autopay_subscriptions.append(sub)
@@ -988,6 +1047,15 @@ class MonitoringService:
             failed_count = 0
 
             for subscription in autopay_subscriptions:
+                from app.database.crud.subscription import is_recently_updated_by_webhook
+
+                if is_recently_updated_by_webhook(subscription):
+                    logger.debug(
+                        'Пропуск автоплатежа подписки %s: обновлена вебхуком недавно',
+                        subscription.id,
+                    )
+                    continue
+
                 user = subscription.user
                 if not user:
                     continue
@@ -1056,13 +1124,50 @@ class MonitoringService:
                         logger.warning(f'💳 Ошибка списания средств для автопродления пользователя {user_identifier}')
                 else:
                     failed_count += 1
-                    if user.telegram_id and self.bot:
-                        await self._send_autopay_failed_notification(user, user.balance_kopeks, charge_amount)
-                    elif not user.telegram_id:
-                        await notification_delivery_service.notify_autopay_failed(
-                            user=user,
-                            reason='Недостаточно средств на балансе',
+
+                    # Проверяем кулдаун уведомления через Redis, чтобы не спамить
+                    # при каждом срабатывании мониторинга
+                    cooldown_key = f'autopay_insufficient_balance_notified:{user.id}'
+                    should_notify = True
+
+                    try:
+                        if await cache.exists(cooldown_key):
+                            should_notify = False
+                            logger.debug(
+                                '💳 Пропуск уведомления о недостаточном балансе для пользователя %s — кулдаун активен',
+                                user_identifier,
+                            )
+                    except Exception as redis_err:
+                        # Fallback: если Redis недоступен — отправляем уведомление
+                        logger.warning(
+                            '⚠️ Ошибка проверки кулдауна в Redis для пользователя %s: %s. Отправляем уведомление.',
+                            user_identifier,
+                            redis_err,
                         )
+
+                    if should_notify:
+                        if user.telegram_id and self.bot:
+                            await self._send_autopay_failed_notification(user, user.balance_kopeks, charge_amount)
+                        elif not user.telegram_id:
+                            await notification_delivery_service.notify_autopay_failed(
+                                user=user,
+                                reason='Недостаточно средств на балансе',
+                            )
+
+                        # Ставим ключ кулдауна после отправки
+                        try:
+                            await cache.set(
+                                cooldown_key,
+                                1,
+                                expire=AUTOPAY_INSUFFICIENT_BALANCE_COOLDOWN_SECONDS,
+                            )
+                        except Exception as redis_err:
+                            logger.warning(
+                                '⚠️ Не удалось установить кулдаун в Redis для пользователя %s: %s',
+                                user_identifier,
+                                redis_err,
+                            )
+
                     logger.warning(f'💳 Недостаточно средств для автопродления у пользователя {user_identifier}')
 
             if processed_count > 0 or failed_count > 0:
@@ -1181,6 +1286,13 @@ class MonitoringService:
                 exc,
             )
             return False
+        except TelegramNetworkError as e:
+            logger.warning(
+                'Таймаут отправки уведомления об истечении подписки пользователю %s: %s',
+                user.telegram_id,
+                e,
+            )
+            return False
         except Exception as e:
             logger.error(
                 'Ошибка отправки уведомления об истечении подписки пользователю %s: %s',
@@ -1193,69 +1305,13 @@ class MonitoringService:
         try:
             get_texts(user.language)
 
-            # Рассчитываем минимальную цену за подписку с минимальной конфигурацией
-            from app.config import PERIOD_PRICES, settings
-            from app.utils.pricing_utils import apply_percentage_discount
-
-            # Базовая цена за 30 дней
-            base_price_original = PERIOD_PRICES.get(30, settings.PRICE_30_DAYS)
-
-            # Применяем скидку промогруппы для категории "period"
-            promo_group_discount = user.get_promo_discount('period', 30) if user else 0
-            # Применяем пользовательскую промо-скидку (если есть)
-            user_discount_percent = self._get_user_promo_offer_discount_percent(user)
-
-            # Общая скидка - максимальная из промогруппы и пользовательской
-            total_discount_percent = max(promo_group_discount, user_discount_percent)
-
-            base_price, _ = apply_percentage_discount(base_price_original, total_discount_percent)
-
-            # Добавляем цену за трафик (если фиксированный трафик включён)
-            if settings.is_traffic_fixed():
-                traffic_price = settings.get_traffic_price(settings.get_fixed_traffic_limit())
-                # Применяем скидки на трафик
-                traffic_discount = user.get_promo_discount('traffic', 30) if user else 0
-                traffic_price, _ = apply_percentage_discount(traffic_price, traffic_discount)
-            else:
-                traffic_price = 0  # Трафик не фиксирован, цена включена в базовую
-
-            # Добавляем цену за серверы (предполагаем минимум 1 сервер по минимальной цене)
-            # Вместо сложного запроса к БД, используем настройки
-            # Для минимальной конфигурации - один сервер с минимальной ценой
-            min_server_price = getattr(settings, 'MIN_SERVER_PRICE', 0) or 0
-            if min_server_price == 0:
-                # Если нет явной минимальной цены, используем базовую цену
-                # В реальных условиях цена сервера будет определяться в ходе оформления подписки
-                min_server_price = 0
-
-            # Добавляем цену за устройства (если больше базового лимита)
-            # В минимальной конфигурации - базовый лимит, без доп. устройств
-            device_limit = settings.DEFAULT_DEVICE_LIMIT
-            additional_devices = max(0, device_limit - settings.DEFAULT_DEVICE_LIMIT)
-            additional_devices * settings.PRICE_PER_DEVICE
-
-            # Для простоты и правильной работы без обращения к БД, рассчитываем минимальную цену как:
-            # базовая цена + минимальная цена за трафик (если есть фиксированный)
-            min_server_price = 0  # для минимальной конфигурации с 1 сервером используем 0 или минимальную известную
-
-            # Попробуем получить минимальную цену сервера из настроек или используем подходящее значение
-            # Находим минимальную возможную цену из возможных цен серверов
-            # В упрощенном варианте используем базовую конфигурацию: базовая цена + трафик
-            min_total_price = base_price + traffic_price
-
-            message = f"""
+            message = """
 🎁 <b>Тестовая подписка скоро закончится!</b>
 
 Ваша тестовая подписка истекает через 2 часа.
 
 💎 <b>Не хотите остаться без VPN?</b>
 Переходите на полную подписку!
-
-🔥 <b>Специальное предложение:</b>
-• 30 дней всего за {settings.format_price(min_total_price)}
-• Безлимитный трафик
-• Все серверы доступны
-• Скорость до 1ГБит/сек
 
 ⚡️ Успейте оформить до окончания тестового периода!
 """
@@ -1284,6 +1340,13 @@ class MonitoringService:
                 'Ошибка Telegram API при отправке уведомления о завершении тестовой подписки пользователю %s: %s',
                 user.telegram_id,
                 exc,
+            )
+            return False
+        except TelegramNetworkError as e:
+            logger.warning(
+                'Таймаут отправки уведомления об окончании тестовой подписки пользователю %s: %s',
+                user.telegram_id,
+                e,
             )
             return False
         except Exception as e:
@@ -1361,6 +1424,13 @@ class MonitoringService:
                 exc,
             )
             return False
+        except TelegramNetworkError as e:
+            logger.warning(
+                'Таймаут отправки уведомления об отсутствии подключения пользователю %s: %s',
+                user.telegram_id,
+                e,
+            )
+            return False
         except Exception as e:
             logger.error(
                 'Ошибка отправки уведомления об отсутствии подключения пользователю %s: %s',
@@ -1422,6 +1492,13 @@ class MonitoringService:
                 'Ошибка Telegram API при отправке уведомления об отписке от канала пользователю %s: %s',
                 user.telegram_id,
                 exc,
+            )
+            return False
+        except TelegramNetworkError as error:
+            logger.warning(
+                'Таймаут отправки уведомления об отписке от канала пользователю %s: %s',
+                user.telegram_id,
+                error,
             )
             return False
         except Exception as error:
@@ -1486,6 +1563,13 @@ class MonitoringService:
                 'Ошибка Telegram API при отправке напоминания об истекшей подписке пользователю %s: %s',
                 user.telegram_id,
                 exc,
+            )
+            return False
+        except TelegramNetworkError as e:
+            logger.warning(
+                'Таймаут отправки напоминания об истекшей подписке пользователю %s: %s',
+                user.telegram_id,
+                e,
             )
             return False
         except Exception as e:
@@ -1580,6 +1664,13 @@ class MonitoringService:
                 exc,
             )
             return False
+        except TelegramNetworkError as e:
+            logger.warning(
+                'Таймаут отправки скидочного уведомления пользователю %s: %s',
+                user.telegram_id,
+                e,
+            )
+            return False
         except Exception as e:
             logger.error(
                 'Ошибка отправки скидочного уведомления пользователю %s: %s',
@@ -1604,6 +1695,12 @@ class MonitoringService:
                     user.telegram_id,
                     exc,
                 )
+        except TelegramNetworkError as e:
+            logger.warning(
+                'Таймаут отправки уведомления об автоплатеже пользователю %s: %s',
+                user.telegram_id,
+                e,
+            )
         except Exception as e:
             logger.error(
                 'Ошибка отправки уведомления об автоплатеже пользователю %s: %s',
@@ -1641,6 +1738,12 @@ class MonitoringService:
                     user.telegram_id,
                     exc,
                 )
+        except TelegramNetworkError as e:
+            logger.warning(
+                'Таймаут отправки уведомления о неудачном автоплатеже пользователю %s: %s',
+                user.telegram_id,
+                e,
+            )
         except Exception as e:
             logger.error(
                 'Ошибка отправки уведомления о неудачном автоплатеже пользователю %s: %s',
@@ -1874,11 +1977,19 @@ class MonitoringService:
             }
 
     async def force_check_subscriptions(self, db: AsyncSession) -> dict[str, int]:
+        from app.database.crud.subscription import is_recently_updated_by_webhook
+
         try:
             expired_subscriptions = await get_expired_subscriptions(db)
             expired_count = 0
 
             for subscription in expired_subscriptions:
+                if is_recently_updated_by_webhook(subscription):
+                    logger.debug(
+                        'Пропуск force-check подписки %s: обновлена вебхуком недавно',
+                        subscription.id,
+                    )
+                    continue
                 await deactivate_subscription(db, subscription)
                 expired_count += 1
 

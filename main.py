@@ -14,6 +14,7 @@ from app.database.database import init_db
 from app.database.models import PaymentMethod
 from app.database.universal_migration import run_universal_migration
 from app.localization.loader import ensure_locale_templates
+from app.logging_handler import TelegramErrorHandler
 from app.services.backup_service import backup_service
 from app.services.ban_notification_service import ban_notification_service
 from app.services.broadcast_service import broadcast_service
@@ -139,6 +140,11 @@ async def main():
             level=getattr(logging, settings.LOG_LEVEL),
             handlers=log_handlers,
         )
+
+    # === TelegramErrorHandler: отправка ERROR/CRITICAL в админский чат ===
+    telegram_error_handler = TelegramErrorHandler(level=logging.ERROR)
+    telegram_error_handler.setFormatter(formatter)
+    logging.getLogger().addHandler(telegram_error_handler)
 
     # Установим более высокий уровень логирования для "мусорных" логов
     # --- SPIDERMAN OVERRIDES: STARTUP PATCHES START ---
@@ -291,6 +297,13 @@ async def main():
         ban_notification_service.set_bot(bot)
         traffic_monitoring_scheduler.set_bot(bot)
         daily_subscription_service.set_bot(bot)
+        telegram_error_handler.set_bot(bot)
+
+        # Initialize email broadcast service
+        from app.cabinet.services.email_service import email_service
+        from app.services.broadcast_service import email_broadcast_service
+
+        email_broadcast_service.set_email_service(email_service)
 
         from app.services.admin_notification_service import AdminNotificationService
 
@@ -509,8 +522,8 @@ async def main():
                 logger.error('❌ Ошибка подготовки внешней админки: %s', error)
 
         bot_run_mode = settings.get_bot_run_mode()
-        polling_enabled = bot_run_mode in {'polling', 'both'}
-        telegram_webhook_enabled = bot_run_mode in {'webhook', 'both'}
+        polling_enabled = bot_run_mode == 'polling'
+        telegram_webhook_enabled = bot_run_mode == 'webhook'
 
         payment_webhooks_enabled = any(
             [
@@ -714,6 +727,14 @@ async def main():
         timeline.log_summary()
         summary_logged = True
 
+        # Отправляем стартовое уведомление в админский чат
+        try:
+            from app.services.startup_notification_service import send_bot_startup_notification
+
+            await send_bot_startup_notification(bot)
+        except Exception as startup_notify_error:
+            logger.warning(f'Не удалось отправить стартовое уведомление: {startup_notify_error}')
+
         try:
             while not killer.exit:
                 await asyncio.sleep(1)
@@ -906,6 +927,30 @@ async def main():
         logger.info('✅ Завершение работы бота завершено')
 
 
+async def _send_crash_notification_on_error(error: Exception) -> None:
+    """Отправляет уведомление о падении бота в админский чат."""
+    import traceback
+
+    from app.config import settings
+
+    if not getattr(settings, 'BOT_TOKEN', None):
+        return
+
+    try:
+        from aiogram import Bot
+
+        from app.services.startup_notification_service import send_crash_notification
+
+        bot = Bot(token=settings.BOT_TOKEN)
+        try:
+            traceback_str = traceback.format_exc()
+            await send_crash_notification(bot, error, traceback_str)
+        finally:
+            await bot.session.close()
+    except Exception as notify_error:
+        print(f'⚠️ Не удалось отправить уведомление о падении: {notify_error}')
+
+
 if __name__ == '__main__':
     try:
         asyncio.run(main())
@@ -913,4 +958,12 @@ if __name__ == '__main__':
         print('\n🛑 Бот остановлен пользователем')
     except Exception as e:
         print(f'❌ Критическая ошибка: {e}')
+        import traceback
+
+        traceback.print_exc()
+        # Пытаемся отправить уведомление о падении
+        try:
+            asyncio.run(_send_crash_notification_on_error(e))
+        except Exception:
+            pass
         sys.exit(1)

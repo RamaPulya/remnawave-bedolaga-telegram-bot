@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import PaymentMethod, TransactionType
 from app.services.subscription_auto_purchase_service import (
-    auto_activate_subscription_after_topup,
     auto_purchase_saved_cart_after_topup,
 )
 from app.utils.payment_logger import payment_logger as logger
@@ -76,7 +75,7 @@ class MulenPayPaymentMixin:
                 uuid=payment_uuid,
                 items=items,
                 language=language or settings.MULENPAY_LANGUAGE,
-                website_url=settings.WEBHOOK_URL,
+                website_url=settings.MULENPAY_WEBSITE_URL or settings.WEBHOOK_URL,
             )
 
             if not response:
@@ -254,6 +253,7 @@ class MulenPayPaymentMixin:
                     payment_method=PaymentMethod.MULENPAY,
                     external_id=payment.uuid,
                     is_completed=True,
+                    created_at=getattr(payment, 'created_at', None),
                 )
 
                 await payment_module.link_mulenpay_payment_to_transaction(
@@ -390,28 +390,7 @@ class MulenPayPaymentMixin:
                         if auto_purchase_success:
                             has_saved_cart = False
 
-                    # Умная автоактивация если автопокупка не сработала
-                    activation_notification_sent = False
-                    if not auto_purchase_success:
-                        try:
-                            _, activation_notification_sent = await auto_activate_subscription_after_topup(
-                                db, user, bot=getattr(self, 'bot', None), topup_amount=payment.amount_kopeks
-                            )
-                        except Exception as auto_activate_error:
-                            logger.error(
-                                'Ошибка умной автоактивации для пользователя %s: %s',
-                                user.id,
-                                auto_activate_error,
-                                exc_info=True,
-                            )
-
-                    # Отправляем уведомление только если его ещё не отправили и есть telegram_id
-                    if (
-                        has_saved_cart
-                        and getattr(self, 'bot', None)
-                        and not activation_notification_sent
-                        and user.telegram_id
-                    ):
+                    if has_saved_cart and getattr(self, 'bot', None) and user.telegram_id:
                         # Если у пользователя есть сохраненная корзина,
                         # отправляем ему уведомление с кнопкой вернуться к оформлению
                         from app.localization.texts import get_texts

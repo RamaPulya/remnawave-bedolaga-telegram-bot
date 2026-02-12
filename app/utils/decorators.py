@@ -89,15 +89,16 @@ def error_handler(func: Callable) -> Callable:
                         await event.answer()
                     except TelegramBadRequest as answer_error:
                         if 'query is too old' not in str(answer_error).lower():
-                            logger.error(f'Ошибка при ответе на callback: {answer_error}')
+                            logger.error(f'Ошибка при ответе на callback в {func.__name__}: {answer_error}')
                 return None
 
             logger.error(f'Telegram API error в {func.__name__}: {e}')
-            await _send_error_message(args, kwargs, e)
+            # Уведомление отправляется в _send_error_message
+            await _send_error_message(args, kwargs, e, func.__name__)
 
         except Exception as e:
             logger.error(f'Ошибка в {func.__name__}: {e}', exc_info=True)
-            await _send_error_message(args, kwargs, e)
+            await _send_error_message(args, kwargs, e, func.__name__)
 
     return wrapper
 
@@ -109,11 +110,12 @@ def _extract_event(args) -> types.TelegramObject:
     return None
 
 
-async def _send_error_message(args, kwargs, original_error):
-    try:
-        event = _extract_event(args)
-        db_user = kwargs.get('db_user')
+async def _send_error_message(args, kwargs, original_error, func_name: str = 'unknown'):
+    event = _extract_event(args)
+    db_user = kwargs.get('db_user')
 
+    # Отправляем сообщение пользователю
+    try:
         if not event:
             return
 
@@ -128,9 +130,9 @@ async def _send_error_message(args, kwargs, original_error):
         if 'query is too old' in str(e).lower():
             logger.warning('Не удалось отправить сообщение об ошибке - callback query устарел')
         else:
-            logger.error(f'Ошибка при отправке сообщения об ошибке: {e}')
+            logger.warning(f'Ошибка при отправке сообщения об ошибке: {e}')
     except Exception as e:
-        logger.error(f'Критическая ошибка при отправке сообщения об ошибке: {e}')
+        logger.warning(f'Критическая ошибка при отправке сообщения об ошибке: {e}')
 
 
 def state_cleanup(func: Callable) -> Callable:
@@ -166,78 +168,6 @@ def rate_limit(rate: float = 1.0, key: str = None):
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         async def wrapper(event: types.Update, *args, **kwargs) -> Any:
-            return await func(event, *args, **kwargs)
-
-        return wrapper
-
-    return decorator
-
-
-def modem_available(for_enable: bool = False, for_disable: bool = False):
-    """
-    Декоратор для проверки доступности модема.
-
-    Проверяет:
-    - Наличие подписки
-    - Подписка не триальная
-    - Функция модема включена в настройках
-    - (опционально) Модем ещё не подключен (for_enable=True)
-    - (опционально) Модем уже подключен (for_disable=True)
-
-    Args:
-        for_enable: Проверять, что модем ещё не подключен
-        for_disable: Проверять, что модем подключен
-
-    Usage:
-        @modem_available()
-        async def handle_modem_menu(callback, db_user, db): ...
-
-        @modem_available(for_enable=True)
-        async def handle_modem_enable(callback, db_user, db): ...
-    """
-
-    def decorator(func: Callable) -> Callable:
-        @functools.wraps(func)
-        async def wrapper(event: types.Update, *args, **kwargs) -> Any:
-            db_user = kwargs.get('db_user')
-
-            if not db_user:
-                logger.warning('modem_available: нет db_user в kwargs')
-                return None
-
-            from app.services.modem_service import ModemError, get_modem_service
-
-            service = get_modem_service()
-            result = service.check_availability(db_user, for_enable=for_enable, for_disable=for_disable)
-
-            if not result.available:
-                texts = get_texts(db_user.language if db_user else 'ru')
-
-                error_messages = {
-                    ModemError.NO_SUBSCRIPTION: texts.t(
-                        'MODEM_PAID_ONLY', 'Модем доступен только для платных подписок'
-                    ),
-                    ModemError.TRIAL_SUBSCRIPTION: texts.t(
-                        'MODEM_PAID_ONLY', 'Модем доступен только для платных подписок'
-                    ),
-                    ModemError.MODEM_DISABLED: texts.t('MODEM_DISABLED', 'Функция модема отключена'),
-                    ModemError.ALREADY_ENABLED: texts.t('MODEM_ALREADY_ENABLED', 'Модем уже подключен'),
-                    ModemError.NOT_ENABLED: texts.t('MODEM_NOT_ENABLED', 'Модем не подключен'),
-                }
-
-                error_text = error_messages.get(result.error, texts.ERROR)
-
-                try:
-                    if isinstance(event, types.CallbackQuery):
-                        await event.answer(error_text, show_alert=True)
-                    elif isinstance(event, types.Message):
-                        await event.answer(error_text)
-                except TelegramBadRequest as e:
-                    if 'query is too old' not in str(e).lower():
-                        raise
-
-                return None
-
             return await func(event, *args, **kwargs)
 
         return wrapper

@@ -1,7 +1,7 @@
 import logging
 import secrets
 import string
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import and_, case, func, nullslast, or_, select, text
 from sqlalchemy.exc import IntegrityError
@@ -26,6 +26,13 @@ from app.utils.validators import sanitize_telegram_name
 
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_language_code(language: str | None, fallback: str = 'ru') -> str:
+    normalized = (language or '').strip().lower()
+    if '-' in normalized:
+        normalized = normalized.split('-', 1)[0]
+    return normalized or fallback
 
 
 def _build_spending_stats_select():
@@ -232,6 +239,7 @@ async def create_user_no_commit(
 
     if not referral_code:
         referral_code = await create_unique_referral_code(db)
+    normalized_language = _normalize_language_code(language)
 
     default_group = await _get_or_create_default_promo_group(db)
     promo_group_id = default_group.id
@@ -243,7 +251,7 @@ async def create_user_no_commit(
         username=username,
         first_name=safe_first,
         last_name=safe_last,
-        language=language,
+        language=normalized_language,
         referred_by_id=referred_by_id,
         referral_code=referral_code,
         balance_kopeks=0,
@@ -277,6 +285,7 @@ async def create_user(
 ) -> User:
     if not referral_code:
         referral_code = await create_unique_referral_code(db)
+    normalized_language = _normalize_language_code(language)
 
     attempts = 3
 
@@ -291,7 +300,7 @@ async def create_user(
             username=username,
             first_name=safe_first,
             last_name=safe_last,
-            language=language,
+            language=normalized_language,
             referred_by_id=referred_by_id,
             referral_code=referral_code,
             balance_kopeks=0,
@@ -360,6 +369,8 @@ async def update_user(db: AsyncSession, user: User, **kwargs) -> User:
     for field, value in kwargs.items():
         if field in ('first_name', 'last_name'):
             value = sanitize_telegram_name(value)
+        if field == 'language':
+            value = _normalize_language_code(value)
         if hasattr(user, field):
             setattr(user, field, value)
 
@@ -407,30 +418,35 @@ async def add_user_balance(
 
         # Автоматическое возобновление приостановленной суточной подписки
         try:
-            from app.database.crud.subscription import resume_daily_subscription
+            from app.database.crud.subscription import get_subscription_by_user_id, resume_daily_subscription
+            from app.database.crud.tariff import get_tariff_by_id
             from app.database.models import SubscriptionStatus
 
-            subscription = user.subscription
+            # Загружаем подписку явно, чтобы избежать lazy loading
+            subscription = await get_subscription_by_user_id(db, user.id)
             if subscription and subscription.status == SubscriptionStatus.DISABLED.value:
                 # Проверяем что это суточный тариф
                 is_daily = getattr(subscription, 'is_daily_tariff', False)
-                if is_daily and subscription.tariff:
-                    daily_price = getattr(subscription.tariff, 'daily_price_kopeks', 0)
-                    # Если баланс достаточный для суточной оплаты - возобновляем
-                    if daily_price > 0 and user.balance_kopeks >= daily_price:
-                        await resume_daily_subscription(db, subscription)
-                        logger.info(
-                            f'✅ Автоматически возобновлена суточная подписка {subscription.id} '
-                            f'после пополнения баланса (user_id={user.id})'
-                        )
-                        # Синхронизируем с RemnaWave
-                        try:
-                            from app.services.subscription_service import SubscriptionService
+                if is_daily and subscription.tariff_id:
+                    # Загружаем тариф явно
+                    tariff = await get_tariff_by_id(db, subscription.tariff_id)
+                    if tariff:
+                        daily_price = getattr(tariff, 'daily_price_kopeks', 0)
+                        # Если баланс достаточный для суточной оплаты - возобновляем
+                        if daily_price > 0 and user.balance_kopeks >= daily_price:
+                            await resume_daily_subscription(db, subscription)
+                            logger.info(
+                                f'✅ Автоматически возобновлена суточная подписка {subscription.id} '
+                                f'после пополнения баланса (user_id={user.id})'
+                            )
+                            # Синхронизируем с RemnaWave
+                            try:
+                                from app.services.subscription_service import SubscriptionService
 
-                            subscription_service = SubscriptionService()
-                            await subscription_service.update_remnawave_user(db, subscription)
-                        except Exception as sync_err:
-                            logger.warning(f'Не удалось синхронизировать с RemnaWave: {sync_err}')
+                                subscription_service = SubscriptionService()
+                                await subscription_service.update_remnawave_user(db, subscription)
+                            except Exception as sync_err:
+                                logger.warning(f'Не удалось синхронизировать с RemnaWave: {sync_err}')
         except Exception as resume_err:
             logger.warning(f'Ошибка при попытке возобновить суточную подписку: {resume_err}')
 
@@ -487,6 +503,10 @@ async def subtract_user_balance(
     logger.info(f'   💸 Сумма к списанию: {amount_kopeks} копеек')
     logger.info(f'   📝 Описание: {description}')
 
+    # Lock the user row to prevent concurrent balance race conditions
+    locked_result = await db.execute(select(User).where(User.id == user.id).with_for_update())
+    user = locked_result.scalar_one()
+
     log_context: dict[str, object] | None = None
     if consume_promo_offer:
         try:
@@ -538,14 +558,13 @@ async def subtract_user_balance(
 
         user.updated_at = datetime.utcnow()
 
-        await db.commit()
-        await db.refresh(user)
-
         if create_transaction:
             from app.database.crud.transaction import (
                 create_transaction as create_trans,
             )
 
+            # create_trans commits the session, atomically persisting
+            # both the balance change and the transaction record
             await create_trans(
                 db=db,
                 user_id=user.id,
@@ -554,6 +573,10 @@ async def subtract_user_balance(
                 description=description,
                 payment_method=payment_method,
             )
+        else:
+            await db.commit()
+
+        await db.refresh(user)
 
         if consume_promo_offer and log_context:
             try:
@@ -686,6 +709,7 @@ async def get_users_list(
     offset: int = 0,
     limit: int = 50,
     search: str | None = None,
+    email: str | None = None,
     status: UserStatus | None = None,
     order_by_balance: bool = False,
     order_by_traffic: bool = False,
@@ -721,6 +745,9 @@ async def get_users_list(
                 pass
 
         query = query.where(or_(*conditions))
+
+    if email:
+        query = query.where(User.email.ilike(f'%{email}%'))
 
     sort_flags = [
         order_by_balance,
@@ -777,7 +804,9 @@ async def get_users_list(
     return users
 
 
-async def get_users_count(db: AsyncSession, status: UserStatus | None = None, search: str | None = None) -> int:
+async def get_users_count(
+    db: AsyncSession, status: UserStatus | None = None, search: str | None = None, email: str | None = None
+) -> int:
     query = select(func.count(User.id))
 
     if status:
@@ -802,6 +831,9 @@ async def get_users_count(db: AsyncSession, status: UserStatus | None = None, se
                 pass
 
         query = query.where(or_(*conditions))
+
+    if email:
+        query = query.where(User.email.ilike(f'%{email}%'))
 
     result = await db.execute(query)
     return result.scalar()
@@ -1046,6 +1078,7 @@ async def create_user_by_email(
         Created User object
     """
     referral_code = await create_unique_referral_code(db)
+    normalized_language = _normalize_language_code(language)
     default_group = await _get_or_create_default_promo_group(db)
 
     user = User(
@@ -1057,7 +1090,7 @@ async def create_user_by_email(
         username=None,
         first_name=sanitize_telegram_name(first_name) if first_name else None,
         last_name=None,
-        language=language,
+        language=normalized_language,
         referred_by_id=referred_by_id,
         referral_code=referral_code,
         balance_kopeks=0,
@@ -1099,3 +1132,223 @@ async def get_user_by_email(db: AsyncSession, email: str) -> User | None:
     """Get user by email address."""
     result = await db.execute(select(User).where(User.email == email))
     return result.scalar_one_or_none()
+
+
+async def is_email_taken(db: AsyncSession, email: str, exclude_user_id: int | None = None) -> bool:
+    """
+    Check if email is already taken by another user.
+
+    Args:
+        db: Database session
+        email: Email to check
+        exclude_user_id: User ID to exclude from check (for current user)
+
+    Returns:
+        True if email is taken, False otherwise
+    """
+    query = select(User.id).where(User.email == email)
+    if exclude_user_id:
+        query = query.where(User.id != exclude_user_id)
+    result = await db.execute(query)
+    return result.scalar_one_or_none() is not None
+
+
+async def set_email_change_pending(
+    db: AsyncSession,
+    user: User,
+    new_email: str,
+    code: str,
+    expires_at: datetime,
+) -> User:
+    """
+    Set pending email change for user.
+
+    Args:
+        db: Database session
+        user: User object
+        new_email: New email address
+        code: 6-digit verification code
+        expires_at: Code expiration datetime
+
+    Returns:
+        Updated User object
+    """
+    user.email_change_new = new_email
+    user.email_change_code = code
+    user.email_change_expires = expires_at
+    user.updated_at = datetime.utcnow()
+
+    await db.commit()
+    await db.refresh(user)
+
+    logger.info(f'Email change pending for user {user.id}: {user.email} -> {new_email}')
+    return user
+
+
+async def verify_and_apply_email_change(db: AsyncSession, user: User, code: str) -> tuple[bool, str]:
+    """
+    Verify email change code and apply the change.
+
+    Args:
+        db: Database session
+        user: User object
+        code: Verification code from user
+
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    if not user.email_change_new or not user.email_change_code:
+        return False, 'No pending email change'
+
+    if user.email_change_expires and datetime.utcnow() > user.email_change_expires:
+        # Clear expired data
+        user.email_change_new = None
+        user.email_change_code = None
+        user.email_change_expires = None
+        await db.commit()
+        return False, 'Verification code has expired'
+
+    if user.email_change_code != code:
+        return False, 'Invalid verification code'
+
+    # Check if new email is still available
+    existing = await get_user_by_email(db, user.email_change_new)
+    if existing and existing.id != user.id:
+        user.email_change_new = None
+        user.email_change_code = None
+        user.email_change_expires = None
+        await db.commit()
+        return False, 'This email is already taken'
+
+    old_email = user.email
+    new_email = user.email_change_new
+
+    # Apply the change
+    user.email = new_email
+    user.email_verified = True
+    user.email_verified_at = datetime.utcnow()
+    user.email_change_new = None
+    user.email_change_code = None
+    user.email_change_expires = None
+    user.updated_at = datetime.utcnow()
+
+    await db.commit()
+    await db.refresh(user)
+
+    logger.info(f'Email changed for user {user.id}: {old_email} -> {new_email}')
+    return True, 'Email changed successfully'
+
+
+async def clear_email_change_pending(db: AsyncSession, user: User) -> None:
+    """
+    Clear pending email change data.
+
+    Args:
+        db: Database session
+        user: User object
+    """
+    user.email_change_new = None
+    user.email_change_code = None
+    user.email_change_expires = None
+    user.updated_at = datetime.utcnow()
+
+    await db.commit()
+    logger.info(f'Email change cancelled for user {user.id}')
+
+
+# --- OAuth provider functions ---
+
+_OAUTH_PROVIDER_COLUMNS = {
+    'google': 'google_id',
+    'yandex': 'yandex_id',
+    'discord': 'discord_id',
+    'vk': 'vk_id',
+}
+
+
+async def get_user_by_oauth_provider(db: AsyncSession, provider: str, provider_id: str) -> User | None:
+    """Find a user by OAuth provider ID."""
+    column_name = _OAUTH_PROVIDER_COLUMNS.get(provider)
+    if not column_name:
+        return None
+    column = getattr(User, column_name)
+    # VK uses BigInteger, so convert
+    value: str | int = int(provider_id) if provider == 'vk' else provider_id
+    result = await db.execute(select(User).where(column == value))
+    return result.scalar_one_or_none()
+
+
+async def set_user_oauth_provider_id(db: AsyncSession, user: User, provider: str, provider_id: str) -> None:
+    """Link an OAuth provider ID to an existing user."""
+    column_name = _OAUTH_PROVIDER_COLUMNS.get(provider)
+    if not column_name:
+        return
+    value: str | int = int(provider_id) if provider == 'vk' else provider_id
+    setattr(user, column_name, value)
+    user.updated_at = datetime.now(UTC).replace(tzinfo=None)
+    logger.info(f'Linked {provider} (id={provider_id}) to user {user.id}')
+
+
+async def create_user_by_oauth(
+    db: AsyncSession,
+    provider: str,
+    provider_id: str,
+    email: str | None = None,
+    email_verified: bool = False,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    username: str | None = None,
+    language: str = 'ru',
+) -> User:
+    """Create a new user via OAuth provider."""
+    referral_code = await create_unique_referral_code(db)
+    normalized_language = _normalize_language_code(language)
+    default_group = await _get_or_create_default_promo_group(db)
+
+    column_name = _OAUTH_PROVIDER_COLUMNS.get(provider)
+    provider_value: str | int = int(provider_id) if provider == 'vk' else provider_id
+
+    user = User(
+        telegram_id=None,
+        auth_type=provider,
+        email=email,
+        email_verified=email_verified,
+        password_hash=None,
+        username=sanitize_telegram_name(username) if username else None,
+        first_name=sanitize_telegram_name(first_name) if first_name else None,
+        last_name=sanitize_telegram_name(last_name) if last_name else None,
+        language=normalized_language,
+        referral_code=referral_code,
+        balance_kopeks=0,
+        has_had_paid_subscription=False,
+        has_made_first_topup=False,
+        promo_group_id=default_group.id,
+    )
+    if column_name:
+        setattr(user, column_name, provider_value)
+
+    db.add(user)
+    await db.flush()
+    await db.refresh(user)
+
+    user.promo_group = default_group
+    logger.info(f'Created OAuth user via {provider} (provider_id={provider_id}) with id={user.id}')
+
+    try:
+        from app.services.event_emitter import event_emitter
+
+        await event_emitter.emit(
+            'user.created',
+            {
+                'user_id': user.id,
+                'email': user.email,
+                'auth_type': provider,
+                'first_name': user.first_name,
+                'referral_code': user.referral_code,
+            },
+            db=db,
+        )
+    except Exception as error:
+        logger.warning('Failed to emit user.created event: %s', error)
+
+    return user

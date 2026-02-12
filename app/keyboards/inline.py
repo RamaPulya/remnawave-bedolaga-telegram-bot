@@ -47,8 +47,6 @@ async def get_main_menu_keyboard_async(
     Иначе делегирует в синхронную версию.
     """
     if settings.MENU_LAYOUT_ENABLED:
-        from datetime import datetime
-
         from app.services.menu_layout_service import MenuContext, MenuLayoutService
 
         # Получаем данные для плейсхолдеров
@@ -247,6 +245,8 @@ _LANGUAGE_DISPLAY_NAMES = {
     'zh-hant': '🇹🇼 中文 (繁體)',
     'vi': '🇻🇳 Tiếng Việt',
     'vi-vn': '🇻🇳 Tiếng Việt',
+    'fa': '🇮🇷 فارسی',
+    'fa-ir': '🇮🇷 فارسی',
 }
 
 
@@ -1789,6 +1789,8 @@ def get_add_traffic_keyboard(
     from app.utils.pricing_utils import get_remaining_months
 
     texts = get_texts(language)
+    language_code = (language or DEFAULT_LANGUAGE).split('-')[0].lower()
+    use_russian_fallback = language_code in {'ru', 'fa'}
 
     months_multiplier = 1
     period_text = ''
@@ -1826,17 +1828,20 @@ def get_add_traffic_keyboard(
         total_discount = discount_per_month * months_multiplier
 
         if gb == 0:
-            if language == 'ru':
+            if use_russian_fallback:
                 text = f'♾️ Безлимитный трафик - {total_price // 100} ₽{period_text}'
             else:
                 text = f'♾️ Unlimited traffic - {total_price // 100} ₽{period_text}'
-        elif language == 'ru':
+        elif use_russian_fallback:
             text = f'📊 +{gb} ГБ трафика - {total_price // 100} ₽{period_text}'
         else:
             text = f'📊 +{gb} GB traffic - {total_price // 100} ₽{period_text}'
 
         if discount_percent > 0 and total_discount > 0:
-            text += f' (скидка {discount_percent}%: -{total_discount // 100}₽)'
+            if use_russian_fallback:
+                text += f' (скидка {discount_percent}%: -{total_discount // 100}₽)'
+            else:
+                text += f' (discount {discount_percent}%: -{total_discount // 100}₽)'
 
         buttons.append([InlineKeyboardButton(text=text, callback_data=f'add_traffic_{gb}')])
 
@@ -1860,16 +1865,9 @@ def get_add_traffic_keyboard_from_tariff(
         subscription_end_date: Дата окончания подписки для расчета цены
         discount_percent: Процент скидки
     """
-    from app.utils.pricing_utils import get_remaining_months
-
     texts = get_texts(language)
-
-    months_multiplier = 1
-    period_text = ''
-    if subscription_end_date:
-        months_multiplier = get_remaining_months(subscription_end_date)
-        if months_multiplier > 1:
-            period_text = f' (за {months_multiplier} мес)'
+    language_code = (language or DEFAULT_LANGUAGE).split('-')[0].lower()
+    use_russian_fallback = language_code in {'ru', 'fa'}
 
     if not packages:
         return InlineKeyboardMarkup(
@@ -1889,21 +1887,26 @@ def get_add_traffic_keyboard_from_tariff(
     # Сортируем пакеты по размеру
     sorted_packages = sorted(packages.items(), key=lambda x: x[0])
 
+    # Пакеты трафика на тарифах покупаются на 1 месяц (30 дней),
+    # цена в тарифе уже месячная — не умножаем на оставшиеся месяцы подписки
     for gb, price_per_month in sorted_packages:
-        discounted_per_month, discount_per_month = apply_percentage_discount(
+        discounted_price, discount_value = apply_percentage_discount(
             price_per_month,
             discount_percent,
         )
-        total_price = discounted_per_month * months_multiplier
-        total_discount = discount_per_month * months_multiplier
 
-        if language == 'ru':
-            text = f'📊 +{gb} ГБ трафика - {total_price // 100} ₽{period_text}'
+        period_text = ' /мес' if use_russian_fallback else ' /mo'
+
+        if use_russian_fallback:
+            text = f'📊 +{gb} ГБ трафика - {discounted_price // 100} ₽{period_text}'
         else:
-            text = f'📊 +{gb} GB traffic - {total_price // 100} ₽{period_text}'
+            text = f'📊 +{gb} GB traffic - {discounted_price // 100} ₽{period_text}'
 
-        if discount_percent > 0 and total_discount > 0:
-            text += f' (скидка {discount_percent}%: -{total_discount // 100}₽)'
+        if discount_percent > 0 and discount_value > 0:
+            if use_russian_fallback:
+                text += f' (скидка {discount_percent}%: -{discount_value // 100}₽)'
+            else:
+                text += f' (discount {discount_percent}%: -{discount_value // 100}₽)'
 
         buttons.append([InlineKeyboardButton(text=text, callback_data=f'add_traffic_{gb}')])
 
@@ -1924,12 +1927,28 @@ def get_change_devices_keyboard(
 
     texts = get_texts(language)
 
-    months_multiplier = 1
-    period_text = ''
-    if subscription_end_date:
-        months_multiplier = get_remaining_months(subscription_end_date)
-        if months_multiplier > 1:
-            period_text = f' (за {months_multiplier} мес)'
+    # Проверяем является ли тариф суточным
+    is_daily_tariff = tariff and getattr(tariff, 'is_daily', False)
+
+    # Для суточных тарифов считаем по дням, для обычных - по месяцам
+    if is_daily_tariff and subscription_end_date:
+        # Суточный тариф: цена за оставшиеся дни (обычно 1 день)
+        from datetime import datetime
+
+        now = datetime.utcnow()
+        days_left = max(1, (subscription_end_date - now).days)
+        # Множитель = days_left / 30 (как в кабинете)
+        price_multiplier = days_left / 30
+        period_text = f' (за {days_left} дн.)' if days_left > 1 else ' (за 1 день)'
+    else:
+        # Обычный тариф: цена за оставшиеся месяцы
+        months_multiplier = 1
+        period_text = ''
+        if subscription_end_date:
+            months_multiplier = get_remaining_months(subscription_end_date)
+            if months_multiplier > 1:
+                period_text = f' (за {months_multiplier} мес)'
+        price_multiplier = months_multiplier
 
     # Используем цену из тарифа если есть, иначе глобальную настройку
     tariff_device_price = getattr(tariff, 'device_price_kopeks', None) if tariff else None
@@ -1943,9 +1962,18 @@ def get_change_devices_keyboard(
 
     buttons = []
 
-    max_devices = settings.MAX_DEVICES_LIMIT if settings.MAX_DEVICES_LIMIT > 0 else 20
+    # Используем max_device_limit из тарифа если есть, иначе глобальную настройку
+    tariff_max_devices = getattr(tariff, 'max_device_limit', None) if tariff else None
+    if tariff_max_devices and tariff_max_devices > 0:
+        max_devices = tariff_max_devices
+    else:
+        max_devices = settings.MAX_DEVICES_LIMIT if settings.MAX_DEVICES_LIMIT > 0 else 20
 
-    start_range = max(1, min(current_devices - 3, max_devices - 6))
+    # Минимальное количество устройств: device_limit тарифа или 1
+    tariff_min_devices = (getattr(tariff, 'device_limit', 1) or 1) if tariff else 1
+    min_devices = max(1, tariff_min_devices)
+
+    start_range = max(min_devices, min(current_devices - 3, max_devices - 6))
     end_range = min(max_devices + 1, max(current_devices + 4, 7))
 
     for devices_count in range(start_range, end_range):
@@ -1967,10 +1995,12 @@ def get_change_devices_keyboard(
                     price_per_month,
                     discount_percent,
                 )
-                total_price = discounted_per_month * months_multiplier
+                total_price = int(discounted_per_month * price_multiplier)
+                total_price = max(100, total_price)  # Минимум 1 рубль
                 price_text = f' (+{total_price // 100}₽{period_text})'
-                if discount_percent > 0 and discount_per_month * months_multiplier > 0:
-                    price_text += f' (скидка {discount_percent}%: -{(discount_per_month * months_multiplier) // 100}₽)'
+                total_discount = int(discount_per_month * price_multiplier)
+                if discount_percent > 0 and total_discount > 0:
+                    price_text += f' (скидка {discount_percent}%: -{total_discount // 100}₽)'
                 action_text = ''
             else:
                 price_text = ' (бесплатно)'
@@ -2042,7 +2072,7 @@ def get_reset_traffic_confirm_keyboard(
             [
                 InlineKeyboardButton(
                     text=texts.t('TOPUP_BALANCE_BUTTON', '💳 Пополнить баланс'),
-                    callback_data=f'topup_amount_{missing_kopeks}',
+                    callback_data='balance_topup',
                 )
             ]
         )
@@ -2588,11 +2618,6 @@ def get_updated_subscription_settings_keyboard(
                     callback_data='subscription_change_devices',
                 )
             ]
-        )
-
-    if settings.is_modem_enabled() and not has_tariff:
-        keyboard.append(
-            [InlineKeyboardButton(text=texts.t('MODEM_BUTTON', '📡 Модем'), callback_data='subscription_modem')]
         )
 
     keyboard.append(

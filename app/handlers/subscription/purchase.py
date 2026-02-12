@@ -39,7 +39,6 @@ from app.keyboards.inline import (
 )
 from app.localization.texts import get_texts
 from app.services.admin_notification_service import AdminNotificationService
-from app.services.blacklist_service import blacklist_service
 from app.services.remnawave_service import RemnaWaveConfigurationError
 from app.services.subscription_checkout_service import (
     clear_subscription_checkout_draft,
@@ -427,14 +426,7 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             '',
         )
 
-    # Формируем отображение лимита устройств с учётом модема
-    modem_enabled = getattr(subscription, 'modem_enabled', False) or False
-    if modem_enabled and settings.is_modem_enabled():
-        # Показываем лимит без модема + модем
-        visible_device_limit = (subscription.device_limit or 1) - 1
-        device_limit_display = f'{visible_device_limit} + модем'
-    else:
-        device_limit_display = str(subscription.device_limit)
+    device_limit_display = str(subscription.device_limit)
 
     message = message_template.format(
         full_name=db_user.full_name,
@@ -560,6 +552,15 @@ async def show_trial_offer(callback: types.CallbackQuery, db_user: User, db: Asy
         return
 
     texts = get_texts(db_user.language)
+
+    # Проверяем, отключён ли триал для этого типа пользователя
+    if settings.is_trial_disabled_for_user(getattr(db_user, 'auth_type', 'telegram')):
+        await callback.message.edit_text(
+            texts.t('TRIAL_DISABLED_FOR_USER_TYPE', 'Пробный период недоступен'),
+            reply_markup=get_back_keyboard(db_user.language),
+        )
+        await callback.answer()
+        return
 
     # Проверяем, использовал ли пользователь триал
     # PENDING триальные подписки не считаются - пользователь может повторить оплату
@@ -749,6 +750,15 @@ async def activate_trial(callback: types.CallbackQuery, db_user: User, db: Async
             f'🚫 <b>Активация подписки ограничена</b>\n\n{reason}\n\n'
             'Если вы считаете это ошибкой, вы можете обжаловать решение.',
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard),
+        )
+        await callback.answer()
+        return
+
+    # Проверяем, отключён ли триал для этого типа пользователя
+    if settings.is_trial_disabled_for_user(getattr(db_user, 'auth_type', 'telegram')):
+        await callback.message.edit_text(
+            texts.t('TRIAL_DISABLED_FOR_USER_TYPE', 'Пробный период недоступен'),
+            reply_markup=get_back_keyboard(db_user.language),
         )
         await callback.answer()
         return
@@ -1385,6 +1395,11 @@ async def return_to_saved_cart(callback: types.CallbackQuery, state: FSMContext,
 
     prepared_cart_data = dict(cart_data)
 
+    if 'period_days' not in prepared_cart_data:
+        await callback.answer('❌ Корзина повреждена. Оформите подписку заново.', show_alert=True)
+        await user_cart_service.delete_user_cart(db_user.id)
+        return
+
     if not settings.is_devices_selection_enabled():
         try:
             from .pricing import _prepare_subscription_summary
@@ -1581,11 +1596,6 @@ async def handle_extend_subscription(callback: types.CallbackQuery, db_user: Use
                     else:
                         device_limit = forced_limit
 
-            # Модем добавляет +1 к device_limit, но оплачивается отдельно,
-            # поэтому не должен учитываться как платное устройство при продлении
-            if getattr(subscription, 'modem_enabled', False):
-                device_limit = max(1, device_limit - 1)
-
             additional_devices = max(0, (device_limit or 0) - settings.DEFAULT_DEVICE_LIMIT)
             devices_price_per_month = additional_devices * settings.PRICE_PER_DEVICE
             devices_total_base = devices_price_per_month * months_in_period
@@ -1724,24 +1734,6 @@ async def handle_extend_subscription(callback: types.CallbackQuery, db_user: Use
 
 
 async def confirm_extend_subscription(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
-    # Проверяем, находится ли пользователь в черном списке
-    is_blacklisted, blacklist_reason = await blacklist_service.is_user_blacklisted(
-        callback.from_user.id, callback.from_user.username
-    )
-
-    if is_blacklisted:
-        logger.warning(f'🚫 Пользователь {callback.from_user.id} находится в черном списке: {blacklist_reason}')
-        try:
-            await callback.answer(
-                f'🚫 Продление подписки невозможно\n\n'
-                f'Причина: {blacklist_reason}\n\n'
-                f'Если вы считаете, что это ошибка, обратитесь в поддержку.',
-                show_alert=True,
-            )
-        except Exception as e:
-            logger.error(f'Ошибка при отправке сообщения о блокировке: {e}')
-        return
-
     days = int(callback.data.split('_')[2])
     texts = get_texts(db_user.language)
 
@@ -1809,11 +1801,6 @@ async def confirm_extend_subscription(callback: types.CallbackQuery, db_user: Us
                     device_limit = settings.DEFAULT_DEVICE_LIMIT
                 else:
                     device_limit = forced_limit
-
-        # Модем добавляет +1 к device_limit, но оплачивается отдельно,
-        # поэтому не должен учитываться как платное устройство при продлении
-        if getattr(subscription, 'modem_enabled', False):
-            device_limit = max(1, device_limit - 1)
 
         additional_devices = max(0, (device_limit or 0) - settings.DEFAULT_DEVICE_LIMIT)
         devices_price_per_month = additional_devices * settings.PRICE_PER_DEVICE
@@ -2228,24 +2215,6 @@ async def devices_continue(callback: types.CallbackQuery, state: FSMContext, db_
 
 
 async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_user: User, db: AsyncSession):
-    # Проверяем, находится ли пользователь в черном списке
-    is_blacklisted, blacklist_reason = await blacklist_service.is_user_blacklisted(
-        callback.from_user.id, callback.from_user.username
-    )
-
-    if is_blacklisted:
-        logger.warning(f'🚫 Пользователь {callback.from_user.id} находится в черном списке: {blacklist_reason}')
-        try:
-            await callback.answer(
-                f'🚫 Покупка подписки невозможна\n\n'
-                f'Причина: {blacklist_reason}\n\n'
-                f'Если вы считаете, что это ошибка, обратитесь в поддержку.',
-                show_alert=True,
-            )
-        except Exception as e:
-            logger.error(f'Ошибка при отправке сообщения о блокировке: {e}')
-        return
-
     # Проверка ограничения на покупку/продление подписки
     if getattr(db_user, 'restriction_subscription', False):
         reason = getattr(db_user, 'restriction_reason', None) or 'Действие ограничено администратором'
@@ -2434,26 +2403,31 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
         promo_offer_discount_percent = 0
 
     # Валидация: проверяем что cached_total_price соответствует ожидаемой финальной цене
-    # Допускаем небольшое расхождение из-за округления (до 5%)
-    price_difference = abs(final_price - cached_total_price)
-    max_allowed_difference = max(500, int(final_price * 0.05))  # 5% или минимум 5₽
-
-    if price_difference > max_allowed_difference:
-        # Слишком большое расхождение - блокируем покупку
-        logger.error(
-            f'Критическое расхождение цены для пользователя {db_user.telegram_id}: '
-            f'кэш={cached_total_price / 100}₽, пересчет={final_price / 100}₽, '
-            f'разница={price_difference / 100}₽ (>{max_allowed_difference / 100}₽). '
-            f'Покупка заблокирована.'
-        )
-        await callback.answer('Цена изменилась. Пожалуйста, начните оформление заново.', show_alert=True)
-        return
-    if price_difference > 100:  # допуск 1₽
-        # Небольшое расхождение - логируем предупреждение но продолжаем
-        logger.warning(
-            f'Расхождение цены для пользователя {db_user.telegram_id}: '
+    # Блокируем только если цена ВЫРОСЛА (пользователь переплатит).
+    # Если цена снизилась (промо-скидка активировалась) — разрешаем покупку по новой цене.
+    price_difference = final_price - cached_total_price
+    if price_difference > 0:
+        max_allowed_increase = max(500, int(final_price * 0.05))  # 5% или минимум 5₽
+        if price_difference > max_allowed_increase:
+            logger.error(
+                f'Цена выросла для пользователя {db_user.telegram_id}: '
+                f'кэш={cached_total_price / 100}₽, пересчет={final_price / 100}₽, '
+                f'разница=+{price_difference / 100}₽ (>{max_allowed_increase / 100}₽). '
+                f'Покупка заблокирована.'
+            )
+            await callback.answer('Цена изменилась. Пожалуйста, начните оформление заново.', show_alert=True)
+            return
+        if price_difference > 100:  # допуск 1₽
+            logger.warning(
+                f'Небольшой рост цены для пользователя {db_user.telegram_id}: '
+                f'кэш={cached_total_price / 100}₽, пересчет={final_price / 100}₽. '
+                f'Используем пересчитанную цену.'
+            )
+    elif price_difference < -100:  # цена снизилась более чем на 1₽
+        logger.info(
+            f'Цена снизилась для пользователя {db_user.telegram_id}: '
             f'кэш={cached_total_price / 100}₽, пересчет={final_price / 100}₽. '
-            f'Используем пересчитанную цену.'
+            f'Применяем новую цену.'
         )
 
     # Используем пересчитанную цену
@@ -3074,18 +3048,12 @@ async def handle_subscription_settings(callback: types.CallbackQuery, db_user: U
             '',
         )
 
-    # Формируем отображение лимита устройств с учётом модема
-    modem_enabled = getattr(subscription, 'modem_enabled', False) or False
-    if modem_enabled and settings.is_modem_enabled():
-        visible_device_limit = (subscription.device_limit or 1) - 1
-        devices_limit_display = f'{visible_device_limit} + модем'
-    else:
-        devices_limit_display = str(subscription.device_limit)
+    devices_limit_display = str(subscription.device_limit)
 
     settings_text = settings_template.format(
         countries_count=len(subscription.connected_squads),
-        traffic_used=texts.format_traffic(subscription.traffic_used_gb),
-        traffic_limit=texts.format_traffic(subscription.traffic_limit_gb),
+        traffic_used=texts.format_traffic(subscription.traffic_used_gb, is_limit=False),
+        traffic_limit=texts.format_traffic(subscription.traffic_limit_gb, is_limit=True),
         devices_used=devices_used,
         devices_limit=devices_limit_display,
     )
@@ -3240,6 +3208,9 @@ async def handle_trial_pay_with_balance(callback: types.CallbackQuery, db_user: 
         return
 
     await db.refresh(db_user)
+
+    # Сохраняем ID до начала транзакции (на случай detached session)
+    user_id_snapshot = db_user.id
 
     # Создаем триальную подписку
     subscription: Subscription | None = None
@@ -3402,22 +3373,33 @@ async def handle_trial_pay_with_balance(callback: types.CallbackQuery, db_user: 
     except Exception as error:
         logger.error(
             'Unexpected error during paid trial activation for user %s: %s',
-            db_user.id,
+            user_id_snapshot,
             error,
         )
-        # Пытаемся откатить и вернуть деньги
-        if subscription:
-            await rollback_trial_subscription_activation(db, subscription)
-        from app.database.crud.user import add_user_balance
+        # Откатываем сессию чтобы очистить PendingRollbackError
+        try:
+            await db.rollback()
+        except Exception:
+            pass
 
-        await add_user_balance(
-            db,
-            db_user,
-            trial_price_kopeks,
-            texts.t('TRIAL_REFUND_DESCRIPTION', 'Возврат за неудачную активацию триала'),
-            transaction_type=TransactionType.REFUND,
-        )
-        await db.refresh(db_user)
+        # Пытаемся вернуть деньги
+        try:
+            from app.database.crud.user import add_user_balance
+
+            await add_user_balance(
+                db,
+                db_user,
+                trial_price_kopeks,
+                texts.t('TRIAL_REFUND_DESCRIPTION', 'Возврат за неудачную активацию триала'),
+                transaction_type=TransactionType.REFUND,
+            )
+            await db.refresh(db_user)
+        except Exception as refund_error:
+            logger.error(
+                'Failed to refund trial payment for user %s: %s',
+                user_id_snapshot,
+                refund_error,
+            )
 
         await callback.message.edit_text(
             texts.t(
@@ -4113,11 +4095,6 @@ def register_handlers(dp: Dispatcher):
 
     dp.callback_query.register(show_device_connection_help, F.data == 'device_connection_help')
 
-    # Регистрируем обработчики модема
-    from .modem import register_modem_handlers
-
-    register_modem_handlers(dp)
-
     # Регистрируем обработчики покупки по тарифам
     from .tariff_purchase import register_tariff_purchase_handlers
 
@@ -4134,24 +4111,6 @@ async def handle_simple_subscription_purchase(
     db: AsyncSession,
 ):
     """Обрабатывает простую покупку подписки."""
-    # Проверяем, находится ли пользователь в черном списке
-    is_blacklisted, blacklist_reason = await blacklist_service.is_user_blacklisted(
-        callback.from_user.id, callback.from_user.username
-    )
-
-    if is_blacklisted:
-        logger.warning(f'🚫 Пользователь {callback.from_user.id} находится в черном списке: {blacklist_reason}')
-        try:
-            await callback.answer(
-                f'🚫 Простая покупка подписки невозможна\n\n'
-                f'Причина: {blacklist_reason}\n\n'
-                f'Если вы считаете, что это ошибка, обратитесь в поддержку.',
-                show_alert=True,
-            )
-        except Exception as e:
-            logger.error(f'Ошибка при отправке сообщения о блокировке: {e}')
-        return
-
     texts = get_texts(db_user.language)
 
     if not settings.SIMPLE_SUBSCRIPTION_ENABLED:
@@ -4170,10 +4129,6 @@ async def handle_simple_subscription_purchase(
     if current_subscription and current_subscription.is_active:
         # При продлении используем текущие устройства подписки, а не дефолтные
         extend_device_limit = current_subscription.device_limit or simple_device_limit
-        # Модем добавляет +1 к device_limit, но оплачивается отдельно
-        modem_enabled = getattr(current_subscription, 'modem_enabled', False)
-        if modem_enabled:
-            extend_device_limit = max(1, extend_device_limit - 1)
         # Используем максимум из текущего и дефолтного
         extend_device_limit = max(simple_device_limit, extend_device_limit)
 
@@ -4187,7 +4142,6 @@ async def handle_simple_subscription_purchase(
             device_limit=extend_device_limit,
             traffic_limit_gb=settings.SIMPLE_SUBSCRIPTION_TRAFFIC_GB,
             squad_uuid=settings.SIMPLE_SUBSCRIPTION_SQUAD_UUID,
-            modem_enabled=modem_enabled,
         )
         return
 
@@ -4307,7 +4261,6 @@ async def _extend_existing_subscription(
     device_limit: int,
     traffic_limit_gb: int,
     squad_uuid: str,
-    modem_enabled: bool = False,
 ):
     """Продлевает существующую подписку."""
     from datetime import datetime, timedelta
@@ -4325,7 +4278,6 @@ async def _extend_existing_subscription(
         'device_limit': device_limit,
         'traffic_limit_gb': traffic_limit_gb,
         'squad_uuid': squad_uuid,
-        'modem_enabled': modem_enabled,
     }
     price_kopeks, price_breakdown = await _calculate_simple_subscription_price(
         db,
@@ -4334,17 +4286,15 @@ async def _extend_existing_subscription(
         resolved_squad_uuid=squad_uuid,
     )
     logger.warning(
-        'SIMPLE_SUBSCRIPTION_EXTEND_PRICE | user=%s | total=%s | base=%s | traffic=%s | devices=%s | modem=%s | servers=%s | discount=%s | device_limit=%s | modem_enabled=%s',
+        'SIMPLE_SUBSCRIPTION_EXTEND_PRICE | user=%s | total=%s | base=%s | traffic=%s | devices=%s | servers=%s | discount=%s | device_limit=%s',
         db_user.id,
         price_kopeks,
         price_breakdown.get('base_price', 0),
         price_breakdown.get('traffic_price', 0),
         price_breakdown.get('devices_price', 0),
-        price_breakdown.get('modem_price', 0),
         price_breakdown.get('servers_price', 0),
         price_breakdown.get('total_discount', 0),
         device_limit,
-        modem_enabled,
     )
 
     # Проверяем баланс пользователя

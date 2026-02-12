@@ -65,11 +65,8 @@ class UserFilterType(Enum):
     """Типы фильтрации пользователей."""
 
     BALANCE = 'balance'
-    TRAFFIC = 'traffic'
-    ACTIVITY = 'activity'
-    SPENDING = 'spending'
-    PURCHASES = 'purchases'
     CAMPAIGN = 'campaign'
+    POTENTIAL_CUSTOMERS = 'potential_customers'
 
 
 @dataclass
@@ -92,39 +89,18 @@ USER_FILTER_CONFIGS: dict[UserFilterType, UserFilterConfig] = {
         pagination_prefix='admin_users_balance_list',
         order_param='order_by_balance',
     ),
-    UserFilterType.TRAFFIC: UserFilterConfig(
-        fsm_state=AdminStates.viewing_user_from_traffic_list,
-        title='👥 <b>Список пользователей по использованному трафику</b>',
-        empty_message='📶 Пользователи с трафиком не найдены',
-        pagination_prefix='admin_users_traffic_list',
-        order_param='order_by_traffic',
-    ),
-    UserFilterType.ACTIVITY: UserFilterConfig(
-        fsm_state=AdminStates.viewing_user_from_last_activity_list,
-        title='👥 <b>Пользователи по активности</b>',
-        empty_message='🕒 Пользователи с активностью не найдены',
-        pagination_prefix='admin_users_activity_list',
-        order_param='order_by_last_activity',
-    ),
-    UserFilterType.SPENDING: UserFilterConfig(
-        fsm_state=AdminStates.viewing_user_from_spending_list,
-        title='👥 <b>Пользователи по сумме трат</b>',
-        empty_message='💳 Пользователи с тратами не найдены',
-        pagination_prefix='admin_users_spending_list',
-        order_param='order_by_total_spent',
-    ),
-    UserFilterType.PURCHASES: UserFilterConfig(
-        fsm_state=AdminStates.viewing_user_from_purchases_list,
-        title='👥 <b>Пользователи по количеству покупок</b>',
-        empty_message='🛒 Пользователи с покупками не найдены',
-        pagination_prefix='admin_users_purchases_list',
-        order_param='order_by_purchase_count',
-    ),
     UserFilterType.CAMPAIGN: UserFilterConfig(
         fsm_state=AdminStates.viewing_user_from_campaign_list,
         title='👥 <b>Пользователи по кампании регистрации</b>',
         empty_message='📢 Пользователи с кампанией не найдены',
         pagination_prefix='admin_users_campaign_list',
+        order_param='',  # использует специальный метод
+    ),
+    UserFilterType.POTENTIAL_CUSTOMERS: UserFilterConfig(
+        fsm_state=AdminStates.viewing_user_from_potential_customers_list,
+        title='👥 <b>Потенциальные клиенты</b>',
+        empty_message='💰 Потенциальные клиенты не найдены',
+        pagination_prefix='admin_users_potential_customers_list',
         order_param='',  # использует специальный метод
     ),
 }
@@ -173,34 +149,6 @@ def _build_user_button_text(
             days_left = (user.subscription.end_date - datetime.utcnow()).days
             button_text += f' | 📅 {days_left}д'
 
-    elif filter_type == UserFilterType.TRAFFIC:
-        if user.subscription:
-            sub = user.subscription
-            used = sub.traffic_used_gb or 0.0
-            if sub.traffic_limit_gb and sub.traffic_limit_gb > 0:
-                limit_display = f'{sub.traffic_limit_gb}'
-            else:
-                limit_display = '♾️'
-            traffic_display = f'{used:.1f}/{limit_display} ГБ'
-        else:
-            traffic_display = 'нет подписки'
-        button_text = f'{status_emoji} {sub_emoji} {user.full_name} | 📶 {traffic_display}'
-        if user.balance_kopeks > 0:
-            button_text += f' | 💰 {settings.format_price(user.balance_kopeks)}'
-
-    elif filter_type == UserFilterType.ACTIVITY:
-        activity_display = format_time_ago(user.last_activity, language) if user.last_activity else 'неизвестно'
-        button_text = f'{status_emoji} {sub_emoji} {user.full_name} | 🕒 {activity_display}'
-
-    elif filter_type in (UserFilterType.SPENDING, UserFilterType.PURCHASES):
-        stats = extra_data.get(user.id, {'total_spent': 0, 'purchase_count': 0}) if extra_data else {}
-        total_spent = stats.get('total_spent', 0)
-        purchases = stats.get('purchase_count', 0)
-        if filter_type == UserFilterType.SPENDING:
-            button_text = f'{status_emoji} {user.full_name} | 💳 {settings.format_price(total_spent)} | 🛒 {purchases}'
-        else:
-            button_text = f'{status_emoji} {user.full_name} | 🛒 {purchases} | 💳 {settings.format_price(total_spent)}'
-
     elif filter_type == UserFilterType.CAMPAIGN:
         info = extra_data.get(user.id, {}) if extra_data else {}
         campaign_name = info.get('campaign_name') or 'Без кампании'
@@ -219,18 +167,6 @@ def _build_user_button_text(
             button_text = f'{status_emoji} {sub_emoji} {short_name}'
             if user.balance_kopeks > 0:
                 button_text += f' | 💰 {settings.format_price(user.balance_kopeks)}'
-        elif filter_type == UserFilterType.TRAFFIC:
-            if user.subscription:
-                sub = user.subscription
-                used = sub.traffic_used_gb or 0.0
-                if sub.traffic_limit_gb and sub.traffic_limit_gb > 0:
-                    limit_display = f'{sub.traffic_limit_gb}'
-                else:
-                    limit_display = '♾️'
-                traffic_display = f'{used:.1f}/{limit_display} ГБ'
-            else:
-                traffic_display = 'нет'
-            button_text = f'{status_emoji} {sub_emoji} {short_name} | 📶 {traffic_display}'
         else:
             button_text = f'{status_emoji} {short_name}'
 
@@ -279,10 +215,6 @@ async def _show_users_list_filtered(
         await callback.message.edit_text(config.empty_message, reply_markup=get_admin_users_keyboard(db_user.language))
         await callback.answer()
         return
-
-    # Для spending/purchases нужны дополнительные данные
-    if filter_type in (UserFilterType.SPENDING, UserFilterType.PURCHASES):
-        extra_data = await user_service.get_user_spending_stats_map(db, [user.id for user in users])
 
     # Формируем текст заголовка
     text = f'{config.title} (стр. {page}/{users_data["total_pages"]})\n\n'
@@ -576,38 +508,122 @@ async def show_users_ready_to_renew(
 
 @admin_required
 @error_handler
-async def show_users_list_by_traffic(
+async def show_potential_customers(
     callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext, page: int = 1
 ):
-    """Список пользователей, отсортированный по использованному трафику (убывание)."""
-    await _show_users_list_filtered(callback, db_user, db, state, UserFilterType.TRAFFIC, page)
+    """Показывает пользователей без активной подписки с балансом >= месячной цены."""
+    await state.set_state(AdminStates.viewing_user_from_potential_customers_list)
 
+    texts = get_texts(db_user.language)
+    from app.config import PERIOD_PRICES
 
-@admin_required
-@error_handler
-async def show_users_list_by_last_activity(
-    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext, page: int = 1
-):
-    """Список пользователей, отсортированный по последней активности."""
-    await _show_users_list_filtered(callback, db_user, db, state, UserFilterType.ACTIVITY, page)
+    monthly_price = PERIOD_PRICES.get(30, 99000)
 
+    user_service = UserService()
+    users_data = await user_service.get_potential_customers(
+        db,
+        min_balance_kopeks=monthly_price,
+        page=page,
+        limit=10,
+    )
 
-@admin_required
-@error_handler
-async def show_users_list_by_spending(
-    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext, page: int = 1
-):
-    """Список пользователей, отсортированный по сумме трат (убывание)."""
-    await _show_users_list_filtered(callback, db_user, db, state, UserFilterType.SPENDING, page)
+    amount_text = settings.format_price(monthly_price)
+    header = texts.t(
+        'ADMIN_USERS_FILTER_POTENTIAL_CUSTOMERS_TITLE',
+        '💰 Потенциальные клиенты',
+    )
+    description = texts.t(
+        'ADMIN_USERS_FILTER_POTENTIAL_CUSTOMERS_DESC',
+        'Пользователи без активной подписки с балансом {amount} или больше.',
+    ).format(amount=amount_text)
 
+    if not users_data['users']:
+        empty_text = texts.t(
+            'ADMIN_USERS_FILTER_POTENTIAL_CUSTOMERS_EMPTY',
+            'Сейчас нет пользователей, которые подходят под этот фильтр.',
+        )
+        await callback.message.edit_text(
+            f'{header}\n\n{description}\n\n{empty_text}',
+            reply_markup=get_admin_users_keyboard(db_user.language),
+        )
+        await callback.answer()
+        return
 
-@admin_required
-@error_handler
-async def show_users_list_by_purchases(
-    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext, page: int = 1
-):
-    """Список пользователей, отсортированный по количеству покупок (убывание)."""
-    await _show_users_list_filtered(callback, db_user, db, state, UserFilterType.PURCHASES, page)
+    text = f'{header}\n\n{description}\n\n'
+    text += 'Нажмите на пользователя для управления:'
+
+    keyboard = []
+
+    for user in users_data['users']:
+        subscription = user.subscription
+        status_emoji = '✅' if user.status == UserStatus.ACTIVE.value else '🚫'
+        subscription_emoji = '❌'
+
+        if subscription:
+            if subscription.is_trial:
+                subscription_emoji = '🎁'
+            elif subscription.is_active:
+                subscription_emoji = '💎'
+            else:
+                subscription_emoji = '⏰'
+
+        button_text = (
+            f'{status_emoji} {subscription_emoji} {user.full_name} | 💰 {settings.format_price(user.balance_kopeks)}'
+        )
+
+        if len(button_text) > 60:
+            short_name = user.full_name
+            if len(short_name) > 20:
+                short_name = short_name[:17] + '...'
+            button_text = (
+                f'{status_emoji} {subscription_emoji} {short_name} | 💰 {settings.format_price(user.balance_kopeks)}'
+            )
+
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f'admin_user_manage_{user.id}',
+                )
+            ]
+        )
+
+    if users_data['total_pages'] > 1:
+        pagination_row = get_admin_pagination_keyboard(
+            users_data['current_page'],
+            users_data['total_pages'],
+            'admin_users_potential_customers_list',
+            'admin_users_potential_customers_filter',
+            db_user.language,
+        ).inline_keyboard[0]
+        keyboard.append(pagination_row)
+
+    keyboard.extend(
+        [
+            [
+                types.InlineKeyboardButton(
+                    text='🔍 Поиск',
+                    callback_data='admin_users_search',
+                ),
+                types.InlineKeyboardButton(
+                    text='📊 Статистика',
+                    callback_data='admin_users_stats',
+                ),
+            ],
+            [
+                types.InlineKeyboardButton(
+                    text='⬅️ Назад',
+                    callback_data='admin_users',
+                )
+            ],
+        ]
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard),
+    )
+    await callback.answer()
 
 
 @admin_required
@@ -649,62 +665,6 @@ async def handle_users_balance_list_pagination(
 
 @admin_required
 @error_handler
-async def handle_users_traffic_list_pagination(
-    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext
-):
-    try:
-        callback_parts = callback.data.split('_')
-        page = int(callback_parts[-1])
-        await show_users_list_by_traffic(callback, db_user, db, state, page)
-    except (ValueError, IndexError) as e:
-        logger.error(f'Ошибка парсинга номера страницы: {e}')
-        await show_users_list_by_traffic(callback, db_user, db, state, 1)
-
-
-@admin_required
-@error_handler
-async def handle_users_activity_list_pagination(
-    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext
-):
-    try:
-        callback_parts = callback.data.split('_')
-        page = int(callback_parts[-1])
-        await show_users_list_by_last_activity(callback, db_user, db, state, page)
-    except (ValueError, IndexError) as e:
-        logger.error(f'Ошибка парсинга номера страницы: {e}')
-        await show_users_list_by_last_activity(callback, db_user, db, state, 1)
-
-
-@admin_required
-@error_handler
-async def handle_users_spending_list_pagination(
-    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext
-):
-    try:
-        callback_parts = callback.data.split('_')
-        page = int(callback_parts[-1])
-        await show_users_list_by_spending(callback, db_user, db, state, page)
-    except (ValueError, IndexError) as e:
-        logger.error(f'Ошибка парсинга номера страницы: {e}')
-        await show_users_list_by_spending(callback, db_user, db, state, 1)
-
-
-@admin_required
-@error_handler
-async def handle_users_purchases_list_pagination(
-    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext
-):
-    try:
-        callback_parts = callback.data.split('_')
-        page = int(callback_parts[-1])
-        await show_users_list_by_purchases(callback, db_user, db, state, page)
-    except (ValueError, IndexError) as e:
-        logger.error(f'Ошибка парсинга номера страницы: {e}')
-        await show_users_list_by_purchases(callback, db_user, db, state, 1)
-
-
-@admin_required
-@error_handler
 async def handle_users_ready_to_renew_pagination(
     callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext
 ):
@@ -714,6 +674,19 @@ async def handle_users_ready_to_renew_pagination(
     except (ValueError, IndexError) as e:
         logger.error(f'Ошибка парсинга номера страницы: {e}')
         await show_users_ready_to_renew(callback, db_user, db, state, 1)
+
+
+@admin_required
+@error_handler
+async def handle_potential_customers_pagination(
+    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext
+):
+    try:
+        page = int(callback.data.split('_')[-1])
+        await show_potential_customers(callback, db_user, db, state, page)
+    except (ValueError, IndexError) as e:
+        logger.error(f'Ошибка парсинга номера страницы: {e}')
+        await show_potential_customers(callback, db_user, db, state, 1)
 
 
 @admin_required
@@ -927,16 +900,6 @@ async def _render_user_subscription_overview(callback: types.CallbackQuery, db: 
                 ),
             ],
         ]
-
-        if settings.is_modem_enabled():
-            modem_status = '✅' if getattr(subscription, 'modem_enabled', False) else '❌'
-            keyboard.append(
-                [
-                    types.InlineKeyboardButton(
-                        text=f'📡 Модем ({modem_status})', callback_data=f'admin_user_modem_{user_id}'
-                    )
-                ]
-            )
 
         # Кнопки тарифов в режиме тарифов
         if settings.is_tariffs_mode():
@@ -1310,18 +1273,12 @@ async def show_user_management(callback: types.CallbackQuery, db_user: User, db:
     current_state = await state.get_state()
     if current_state == AdminStates.viewing_user_from_balance_list:
         back_callback = 'admin_users_balance_filter'
-    elif current_state == AdminStates.viewing_user_from_traffic_list:
-        back_callback = 'admin_users_traffic_filter'
-    elif current_state == AdminStates.viewing_user_from_last_activity_list:
-        back_callback = 'admin_users_activity_filter'
-    elif current_state == AdminStates.viewing_user_from_spending_list:
-        back_callback = 'admin_users_spending_filter'
-    elif current_state == AdminStates.viewing_user_from_purchases_list:
-        back_callback = 'admin_users_purchases_filter'
     elif current_state == AdminStates.viewing_user_from_campaign_list:
         back_callback = 'admin_users_campaign_filter'
     elif current_state == AdminStates.viewing_user_from_ready_to_renew_list:
         back_callback = 'admin_users_ready_to_renew_filter'
+    elif current_state == AdminStates.viewing_user_from_potential_customers_list:
+        back_callback = 'admin_users_potential_customers_filter'
 
     # Базовая клавиатура профиля
     kb = get_user_management_keyboard(user.id, user.status, db_user.language, back_callback)
@@ -2635,8 +2592,15 @@ async def show_inactive_users(callback: types.CallbackQuery, db_user: User, db: 
         await callback.answer()
         return
 
+    with_active_sub = sum(1 for u in inactive_users if u.subscription and u.subscription.is_active)
+    will_delete = len(inactive_users) - with_active_sub
+
     text = '🗑️ <b>Неактивные пользователи</b>\n'
-    text += f'Без активности более {settings.INACTIVE_USER_DELETE_MONTHS} месяцев: {len(inactive_users)}\n\n'
+    text += f'Без активности более {settings.INACTIVE_USER_DELETE_MONTHS} месяцев: {len(inactive_users)}\n'
+    if with_active_sub > 0:
+        text += f'🛡️ С активной подпиской (не будут удалены): {with_active_sub}\n'
+        text += f'🗑️ Будет удалено: {will_delete}\n'
+    text += '\n'
 
     for user in inactive_users[:10]:
         if user.telegram_id:
@@ -2645,7 +2609,9 @@ async def show_inactive_users(callback: types.CallbackQuery, db_user: User, db: 
         else:
             user_link = f'<b>{user.full_name}</b>'
             user_id_display = user.email or f'#{user.id}'
-        text += f'👤 {user_link}\n'
+        has_active = user.subscription and user.subscription.is_active
+        sub_badge = ' 🛡️' if has_active else ''
+        text += f'👤 {user_link}{sub_badge}\n'
         text += f'🆔 <code>{user_id_display}</code>\n'
         last_activity_display = (
             format_time_ago(user.last_activity, db_user.language) if user.last_activity else 'Никогда'
@@ -3662,65 +3628,6 @@ async def set_user_devices_button(callback: types.CallbackQuery, db_user: User, 
 
     await callback.answer()
 
-
-@admin_required
-@error_handler
-async def toggle_user_modem(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
-    """Переключение модема для пользователя в админке."""
-    user_id = int(callback.data.split('_')[-1])
-
-    user = await get_user_by_id(db, user_id)
-    if not user:
-        await callback.answer('❌ Пользователь не найден', show_alert=True)
-        return
-
-    subscription = user.subscription
-    if not subscription:
-        await callback.answer('❌ У пользователя нет подписки', show_alert=True)
-        return
-
-    modem_enabled = getattr(subscription, 'modem_enabled', False) or False
-
-    if modem_enabled:
-        # Отключаем модем
-        subscription.modem_enabled = False
-        if subscription.device_limit and subscription.device_limit > 1:
-            subscription.device_limit = subscription.device_limit - 1
-        action_text = 'отключен'
-    else:
-        # Включаем модем
-        subscription.modem_enabled = True
-        subscription.device_limit = (subscription.device_limit or 1) + 1
-        action_text = 'подключен'
-
-    subscription.updated_at = datetime.utcnow()
-    await db.commit()
-
-    # Обновляем в RemnaWave
-    try:
-        subscription_service = SubscriptionService()
-        await subscription_service.update_remnawave_user(db, subscription)
-    except Exception as e:
-        logger.error(f'Ошибка обновления RemnaWave при переключении модема: {e}')
-
-    await db.refresh(subscription)
-
-    modem_status = '✅ Подключен' if subscription.modem_enabled else '❌ Отключен'
-
-    await callback.message.edit_text(
-        f'📡 <b>Модем {action_text}</b>\n\nСтатус модема: {modem_status}\nЛимит устройств: {subscription.device_limit}',
-        reply_markup=types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    types.InlineKeyboardButton(
-                        text='📱 Подписка и настройки', callback_data=f'admin_user_subscription_{user_id}'
-                    )
-                ]
-            ]
-        ),
-        parse_mode='HTML',
-    )
-
     logger.info(f'Админ {db_user.telegram_id} {action_text} модем для пользователя {user_id}')
     await callback.answer()
 
@@ -4288,10 +4195,14 @@ async def _calculate_subscription_period_price(
 @error_handler
 async def cleanup_inactive_users(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
     user_service = UserService()
-    deleted_count = await user_service.cleanup_inactive_users(db)
+    deleted_count, skipped_count = await user_service.cleanup_inactive_users(db)
+
+    text = f'✅ Очистка завершена\n\nУдалено неактивных пользователей: {deleted_count}'
+    if skipped_count > 0:
+        text += f'\n⏭️ Пропущено (активная подписка): {skipped_count}'
 
     await callback.message.edit_text(
-        f'✅ Очистка завершена\n\nУдалено неактивных пользователей: {deleted_count}',
+        text,
         reply_markup=types.InlineKeyboardMarkup(
             inline_keyboard=[[types.InlineKeyboardButton(text='⬅️ Назад', callback_data='admin_users')]]
         ),
@@ -4654,6 +4565,8 @@ async def admin_buy_subscription_execute(callback: types.CallbackQuery, db_user:
                                 full_name=target_user.full_name,
                                 username=target_user.username,
                                 telegram_id=target_user.telegram_id,
+                                email=target_user.email,
+                                user_id=target_user.id,
                             ),
                             active_internal_squads=subscription.connected_squads,
                         )
@@ -4667,6 +4580,8 @@ async def admin_buy_subscription_execute(callback: types.CallbackQuery, db_user:
                         full_name=target_user.full_name,
                         username=target_user.username,
                         telegram_id=target_user.telegram_id,
+                        email=target_user.email,
+                        user_id=target_user.id,
                     )
                     async with remnawave_service.get_api_client() as api:
                         create_kwargs = dict(
@@ -4678,10 +4593,12 @@ async def admin_buy_subscription_execute(callback: types.CallbackQuery, db_user:
                             else 0,
                             traffic_limit_strategy=TrafficLimitStrategy.MONTH,
                             telegram_id=target_user.telegram_id,
+                            email=target_user.email,
                             description=settings.format_remnawave_user_description(
                                 full_name=target_user.full_name,
                                 username=target_user.username,
                                 telegram_id=target_user.telegram_id,
+                                email=target_user.email,
                             ),
                             active_internal_squads=subscription.connected_squads,
                         )
@@ -5484,23 +5401,11 @@ def register_handlers(dp: Dispatcher):
     )
 
     dp.callback_query.register(
-        handle_users_traffic_list_pagination, F.data.startswith('admin_users_traffic_list_page_')
-    )
-
-    dp.callback_query.register(
-        handle_users_activity_list_pagination, F.data.startswith('admin_users_activity_list_page_')
-    )
-
-    dp.callback_query.register(
-        handle_users_spending_list_pagination, F.data.startswith('admin_users_spending_list_page_')
-    )
-
-    dp.callback_query.register(
-        handle_users_purchases_list_pagination, F.data.startswith('admin_users_purchases_list_page_')
-    )
-
-    dp.callback_query.register(
         handle_users_ready_to_renew_pagination, F.data.startswith('admin_users_ready_to_renew_list_page_')
+    )
+
+    dp.callback_query.register(
+        handle_potential_customers_pagination, F.data.startswith('admin_users_potential_customers_list_page_')
     )
 
     dp.callback_query.register(
@@ -5604,8 +5509,6 @@ def register_handlers(dp: Dispatcher):
 
     dp.callback_query.register(set_user_devices_button, F.data.startswith('admin_user_devices_set_'))
 
-    dp.callback_query.register(toggle_user_modem, F.data.startswith('admin_user_modem_'))
-
     # Смена тарифа пользователя
     dp.callback_query.register(show_admin_tariff_change, F.data.startswith('admin_sub_change_tariff_'))
 
@@ -5659,14 +5562,8 @@ def register_handlers(dp: Dispatcher):
 
     dp.callback_query.register(show_users_list_by_balance, F.data == 'admin_users_balance_filter')
 
-    dp.callback_query.register(show_users_list_by_traffic, F.data == 'admin_users_traffic_filter')
-
-    dp.callback_query.register(show_users_list_by_last_activity, F.data == 'admin_users_activity_filter')
-
-    dp.callback_query.register(show_users_list_by_spending, F.data == 'admin_users_spending_filter')
-
-    dp.callback_query.register(show_users_list_by_purchases, F.data == 'admin_users_purchases_filter')
-
     dp.callback_query.register(show_users_ready_to_renew, F.data == 'admin_users_ready_to_renew_filter')
+
+    dp.callback_query.register(show_potential_customers, F.data == 'admin_users_potential_customers_filter')
 
     dp.callback_query.register(show_users_list_by_campaign, F.data == 'admin_users_campaign_filter')

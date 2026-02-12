@@ -63,6 +63,71 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/subscription', tags=['Cabinet Subscription'])
 
 
+def _get_addon_discount_percent(
+    user: User,
+    category: str,
+    period_days: int | None = None,
+) -> int:
+    """Get addon discount percent for user from promo group.
+
+    Mirrors logic from app/handlers/subscription/common.py:_get_addon_discount_percent_for_user
+    """
+    promo_group = (
+        user.get_primary_promo_group()
+        if hasattr(user, 'get_primary_promo_group')
+        else getattr(user, 'promo_group', None)
+    )
+    if promo_group is None:
+        return 0
+
+    if not getattr(promo_group, 'apply_discounts_to_addons', True):
+        return 0
+
+    try:
+        return user.get_promo_discount(category, period_days)
+    except AttributeError:
+        return 0
+
+
+def _apply_addon_discount(
+    user: User,
+    category: str,
+    amount: int,
+    period_days: int | None = None,
+) -> dict[str, int]:
+    """Apply addon discount to amount.
+
+    Returns dict with keys: discounted, discount, percent
+    """
+    percent = _get_addon_discount_percent(user, category, period_days)
+    if percent <= 0 or amount <= 0:
+        return {'discounted': amount, 'discount': 0, 'percent': 0}
+
+    discount_value = int(amount * percent / 100)
+    discounted_amount = amount - discount_value
+    return {
+        'discounted': discounted_amount,
+        'discount': discount_value,
+        'percent': percent,
+    }
+
+
+def _get_period_discount_percent(user: User, period_days: int | None = None) -> int:
+    """Get period discount percent for tariff switch calculations."""
+    promo_group = (
+        user.get_primary_promo_group()
+        if hasattr(user, 'get_primary_promo_group')
+        else getattr(user, 'promo_group', None)
+    )
+    if promo_group is None:
+        return 0
+
+    try:
+        return user.get_promo_discount('period', period_days)
+    except AttributeError:
+        return 0
+
+
 def _subscription_to_response(
     subscription: Subscription,
     servers: list[ServerInfo] | None = None,
@@ -462,6 +527,31 @@ async def renew_subscription(
 
     await db.commit()
 
+    # Отправляем уведомление админам о продлении подписки
+    try:
+        from aiogram import Bot
+
+        from app.services.admin_notification_service import AdminNotificationService
+
+        if getattr(settings, 'ADMIN_NOTIFICATIONS_ENABLED', False) and settings.BOT_TOKEN:
+            bot = Bot(token=settings.BOT_TOKEN)
+            try:
+                notification_service = AdminNotificationService(bot)
+                await notification_service.send_subscription_purchase_notification(
+                    db=db,
+                    user=user,
+                    subscription=user.subscription,
+                    transaction=None,
+                    period_days=request.period_days,
+                    was_trial_conversion=False,
+                    amount_kopeks=price_kopeks,
+                    purchase_type='renewal',
+                )
+            finally:
+                await bot.session.close()
+    except Exception as e:
+        logger.error(f'Failed to send admin notification for subscription renewal: {e}')
+
     response = {
         'message': 'Subscription renewed successfully',
         'new_end_date': user.subscription.end_date.isoformat(),
@@ -529,7 +619,7 @@ async def get_traffic_packages(
         if tariff and not tariff.allow_traffic_topup:
             return []
 
-    packages = settings.get_traffic_packages()
+    packages = settings.get_traffic_topup_packages()
     result = []
 
     for pkg in packages:
@@ -634,7 +724,7 @@ async def purchase_traffic(
                 )
 
         # Получаем цену из глобальных настроек
-        packages = settings.get_traffic_packages()
+        packages = settings.get_traffic_topup_packages()
         matching_pkg = next((pkg for pkg in packages if pkg['gb'] == request.gb and pkg.get('enabled', True)), None)
         if not matching_pkg:
             raise HTTPException(
@@ -643,32 +733,63 @@ async def purchase_traffic(
             )
         base_price_kopeks = matching_pkg['price']
 
-    # Применяем скидку промогруппы
-    traffic_discount_percent = 0
-    promo_group = (
-        user.get_primary_promo_group()
-        if hasattr(user, 'get_primary_promo_group')
-        else getattr(user, 'promo_group', None)
-    )
-    if promo_group:
-        apply_to_addons = getattr(promo_group, 'apply_discounts_to_addons', True)
-        if apply_to_addons:
-            traffic_discount_percent = max(0, min(100, int(getattr(promo_group, 'traffic_discount_percent', 0) or 0)))
+    # На тарифах пакеты трафика покупаются на 1 месяц (30 дней),
+    # цена в тарифе уже месячная — не умножаем на оставшиеся месяцы подписки.
+    # Пропорциональный расчёт применяем только в классическом режиме.
+    if is_tariff_mode:
+        prorated_price = base_price_kopeks
+        months_charged = 1
+    else:
+        prorated_price, months_charged = calculate_prorated_price(
+            base_price_kopeks,
+            subscription.end_date,
+        )
 
-    if traffic_discount_percent > 0:
-        base_price_kopeks = int(base_price_kopeks * (100 - traffic_discount_percent) / 100)
+    # Apply discount from promo group using proper method
+    period_hint_days = months_charged * 30 if months_charged > 0 else 30
+    discount_result = _apply_addon_discount(user, 'traffic', prorated_price, period_hint_days)
+    final_price = discount_result['discounted']
+    traffic_discount_percent = discount_result['percent']
+    discount_value = discount_result['discount']
 
-    # Пропорциональный расчёт цены
-    final_price, months_charged = calculate_prorated_price(
-        base_price_kopeks,
-        subscription.end_date,
-    )
+    # Ensure minimum price after discount (except for 100% discount)
+    if traffic_discount_percent < 100 and final_price > 0:
+        final_price = max(100, final_price)
 
     # Проверяем баланс
     if user.balance_kopeks < final_price:
+        missing = final_price - user.balance_kopeks
+
+        # Save cart for auto-purchase after balance top-up
+        cart_data = {
+            'cart_mode': 'add_traffic',
+            'subscription_id': subscription.id,
+            'traffic_gb': request.gb,
+            'price_kopeks': final_price,
+            'base_price_kopeks': prorated_price,
+            'discount_percent': traffic_discount_percent,
+            'source': 'cabinet',
+            'description': f'Докупка {request.gb} ГБ трафика',
+        }
+
+        try:
+            await user_cart_service.save_user_cart(user.id, cart_data)
+            logger.info(
+                f'Cart saved for traffic purchase (cabinet) user {user.id}: '
+                f'+{request.gb} GB, discount {traffic_discount_percent}%'
+            )
+        except Exception as e:
+            logger.error(f'Error saving cart for traffic purchase (cabinet): {e}')
+
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail=f'Insufficient balance. Need {final_price / 100:.2f} RUB, have {user.balance_kopeks / 100:.2f} RUB',
+            detail={
+                'code': 'insufficient_funds',
+                'message': f'Недостаточно средств. Не хватает {settings.format_price(missing)}',
+                'missing_amount': missing,
+                'cart_saved': True,
+                'cart_mode': 'add_traffic',
+            },
         )
 
     # Формируем описание
@@ -724,24 +845,58 @@ async def purchase_traffic(
     await db.refresh(user)
     await db.refresh(subscription)
 
-    return {
+    # Отправляем уведомление админам
+    try:
+        from aiogram import Bot
+
+        from app.services.admin_notification_service import AdminNotificationService
+
+        if getattr(settings, 'ADMIN_NOTIFICATIONS_ENABLED', False) and settings.BOT_TOKEN:
+            bot = Bot(token=settings.BOT_TOKEN)
+            try:
+                notification_service = AdminNotificationService(bot)
+                old_traffic = subscription.traffic_limit_gb - request.gb
+                await notification_service.send_subscription_update_notification(
+                    db=db,
+                    user=user,
+                    subscription=subscription,
+                    update_type='traffic',
+                    old_value=old_traffic,
+                    new_value=subscription.traffic_limit_gb,
+                    price_paid=final_price,
+                )
+            finally:
+                await bot.session.close()
+    except Exception as e:
+        logger.error(f'Failed to send admin notification for traffic purchase: {e}')
+
+    response = {
         'success': True,
         'message': 'Traffic purchased successfully',
         'gb_added': request.gb,
         'new_traffic_limit_gb': subscription.traffic_limit_gb,
         'amount_paid_kopeks': final_price,
-        'discount_percent': traffic_discount_percent,
         'new_balance_kopeks': user.balance_kopeks,
     }
 
+    if traffic_discount_percent > 0:
+        response['discount_percent'] = traffic_discount_percent
+        response['discount_kopeks'] = discount_value
+        response['base_price_kopeks'] = prorated_price
+
+    return response
+
 
 @router.post('/devices')
-async def purchase_devices(
+async def purchase_devices_legacy(
     request: DevicePurchaseRequest,
     user: User = Depends(get_current_cabinet_user),
     db: AsyncSession = Depends(get_cabinet_db),
 ):
-    """Purchase additional device slots."""
+    """Purchase additional device slots (legacy endpoint without tariff support).
+
+    DEPRECATED: Use /devices/purchase instead for full tariff and discount support.
+    """
     await db.refresh(user, ['subscription'])
 
     if not user.subscription:
@@ -751,13 +906,46 @@ async def purchase_devices(
         )
 
     price_per_device = settings.PRICE_PER_DEVICE
-    total_price = price_per_device * request.devices
+    base_total_price = price_per_device * request.devices
+
+    # Apply discount from promo group
+    discount_result = _apply_addon_discount(user, 'devices', base_total_price, 30)
+    total_price = discount_result['discounted']
+    devices_discount_percent = discount_result['percent']
+
+    # Ensure minimum price after discount (except for 100% discount)
+    if devices_discount_percent < 100 and total_price > 0:
+        total_price = max(100, total_price)
 
     # Check balance
     if user.balance_kopeks < total_price:
+        missing = total_price - user.balance_kopeks
+
+        # Сохраняем корзину для автопокупки после пополнения
+        try:
+            cart_data = {
+                'cart_mode': 'add_devices',
+                'devices_to_add': request.devices,
+                'price_kopeks': total_price,
+                'base_price_kopeks': base_total_price,
+                'discount_percent': devices_discount_percent,
+                'source': 'cabinet',
+            }
+            await user_cart_service.save_user_cart(user.id, cart_data)
+            logger.info(f'Cart saved for device purchase (cabinet /devices) user {user.id}: +{request.devices} devices')
+        except Exception as e:
+            logger.error(f'Error saving cart for device purchase (cabinet /devices): {e}')
+
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail='Insufficient balance',
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={
+                'code': 'insufficient_funds',
+                'error': 'Insufficient balance',
+                'required_kopeks': total_price,
+                'current_kopeks': user.balance_kopeks,
+                'missing_kopeks': missing,
+                'cart_saved': True,
+            },
         )
 
     # Check max devices limit
@@ -771,18 +959,68 @@ async def purchase_devices(
             detail=f'Maximum device limit is {max_devices}',
         )
 
-    # Deduct balance and add devices
-    user.balance_kopeks -= total_price
+    # Deduct balance and create transaction
+    from app.database.crud.user import subtract_user_balance
+    from app.database.models import PaymentMethod
+
+    # Build description with discount info
+    if devices_discount_percent > 0:
+        description = f'Покупка {request.devices} доп. устройств (скидка {devices_discount_percent}%)'
+    else:
+        description = f'Покупка {request.devices} доп. устройств'
+
+    await subtract_user_balance(
+        db=db,
+        user=user,
+        amount_kopeks=total_price,
+        description=description,
+        create_transaction=True,
+        payment_method=PaymentMethod.BALANCE,
+    )
+
+    # Add devices
     user.subscription.device_limit = new_devices
 
     await db.commit()
+    await db.refresh(user)
 
-    return {
+    # Отправляем уведомление админам
+    try:
+        from aiogram import Bot
+
+        from app.services.admin_notification_service import AdminNotificationService
+
+        if getattr(settings, 'ADMIN_NOTIFICATIONS_ENABLED', False) and settings.BOT_TOKEN:
+            bot = Bot(token=settings.BOT_TOKEN)
+            try:
+                notification_service = AdminNotificationService(bot)
+                await notification_service.send_subscription_update_notification(
+                    db=db,
+                    user=user,
+                    subscription=user.subscription,
+                    update_type='devices',
+                    old_value=current_devices,
+                    new_value=new_devices,
+                    price_paid=total_price,
+                )
+            finally:
+                await bot.session.close()
+    except Exception as e:
+        logger.error(f'Failed to send admin notification for device purchase: {e}')
+
+    response = {
         'message': 'Devices added successfully',
         'devices_added': request.devices,
         'new_device_limit': new_devices,
         'amount_paid_kopeks': total_price,
     }
+
+    if devices_discount_percent > 0:
+        response['discount_percent'] = devices_discount_percent
+        response['discount_kopeks'] = discount_result['discount']
+        response['base_price_kopeks'] = base_total_price
+
+    return response
 
 
 @router.patch('/autopay')
@@ -799,6 +1037,16 @@ async def update_autopay(
             status_code=status.HTTP_404_NOT_FOUND,
             detail='No subscription found',
         )
+
+    # Суточные подписки имеют свой механизм продления (DailySubscriptionService),
+    # глобальный autopay для них запрещён
+    if request.enabled:
+        await db.refresh(user.subscription, ['tariff'])
+        if user.subscription.tariff and getattr(user.subscription.tariff, 'is_daily', False):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Autopay is not available for daily subscriptions',
+            )
 
     user.subscription.autopay_enabled = request.enabled
 
@@ -822,11 +1070,46 @@ async def get_trial_info(
     """Get trial subscription info and availability."""
     await db.refresh(user, ['subscription'])
 
+    # Проверяем, отключён ли триал для этого типа пользователя
+    if settings.is_trial_disabled_for_user(getattr(user, 'auth_type', 'telegram')):
+        return TrialInfoResponse(
+            is_available=False,
+            duration_days=settings.TRIAL_DURATION_DAYS,
+            traffic_limit_gb=settings.TRIAL_TRAFFIC_LIMIT_GB,
+            device_limit=settings.TRIAL_DEVICE_LIMIT,
+            requires_payment=bool(settings.TRIAL_PAYMENT_ENABLED),
+            price_kopeks=0,
+            price_rubles=0,
+            reason_unavailable='Trial is not available for your account type',
+        )
+
     duration_days = settings.TRIAL_DURATION_DAYS
     traffic_limit_gb = settings.TRIAL_TRAFFIC_LIMIT_GB
     device_limit = settings.TRIAL_DEVICE_LIMIT
     requires_payment = bool(settings.TRIAL_PAYMENT_ENABLED)
     price_kopeks = settings.TRIAL_ACTIVATION_PRICE if requires_payment else 0
+
+    # Get trial parameters from tariff if configured (same logic as activate_trial)
+    try:
+        from app.database.crud.tariff import get_tariff_by_id, get_trial_tariff
+
+        trial_tariff = await get_trial_tariff(db)
+
+        if not trial_tariff:
+            trial_tariff_id = settings.get_trial_tariff_id()
+            if trial_tariff_id > 0:
+                trial_tariff = await get_tariff_by_id(db, trial_tariff_id)
+                if trial_tariff and not trial_tariff.is_active:
+                    trial_tariff = None
+
+        if trial_tariff:
+            traffic_limit_gb = trial_tariff.traffic_limit_gb
+            device_limit = trial_tariff.device_limit
+            tariff_trial_days = getattr(trial_tariff, 'trial_duration_days', None)
+            if tariff_trial_days:
+                duration_days = tariff_trial_days
+    except Exception as e:
+        logger.error(f'Error getting trial tariff for info: {e}')
 
     # Check if user already has an active subscription
     if user.subscription:
@@ -878,6 +1161,13 @@ async def activate_trial(
     """Activate trial subscription."""
     await db.refresh(user, ['subscription'])
 
+    # Проверяем, отключён ли триал для этого типа пользователя
+    if settings.is_trial_disabled_for_user(getattr(user, 'auth_type', 'telegram')):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Trial is not available for your account type',
+        )
+
     # Check if user already has an active subscription
     if user.subscription:
         now = datetime.utcnow()
@@ -916,25 +1206,32 @@ async def activate_trial(
     trial_squads = []
     tariff_id_for_trial = None
 
-    trial_tariff_id = settings.get_trial_tariff_id()
-    if trial_tariff_id:
-        try:
-            from app.database.crud.tariff import get_tariff_by_id
+    # First check for tariff with is_trial_available flag in DB (set via admin panel)
+    # Then fallback to TRIAL_TARIFF_ID from settings
+    trial_tariff = None
+    try:
+        from app.database.crud.tariff import get_tariff_by_id, get_trial_tariff
 
-            trial_tariff = await get_tariff_by_id(db, trial_tariff_id)
-            if trial_tariff:
-                trial_traffic_limit = trial_tariff.traffic_limit_gb
-                trial_device_limit = trial_tariff.device_limit
-                trial_squads = trial_tariff.allowed_squads or []
-                tariff_id_for_trial = trial_tariff.id
-                tariff_trial_days = getattr(trial_tariff, 'trial_duration_days', None)
-                if tariff_trial_days:
-                    trial_duration = tariff_trial_days
-                logger.info(
-                    f'Using trial tariff {trial_tariff.name} (ID: {trial_tariff.id}) with squads: {trial_squads}'
-                )
-        except Exception as e:
-            logger.error(f'Error getting trial tariff: {e}')
+        trial_tariff = await get_trial_tariff(db)
+
+        if not trial_tariff:
+            trial_tariff_id = settings.get_trial_tariff_id()
+            if trial_tariff_id > 0:
+                trial_tariff = await get_tariff_by_id(db, trial_tariff_id)
+                if trial_tariff and not trial_tariff.is_active:
+                    trial_tariff = None
+
+        if trial_tariff:
+            trial_traffic_limit = trial_tariff.traffic_limit_gb
+            trial_device_limit = trial_tariff.device_limit
+            trial_squads = trial_tariff.allowed_squads or []
+            tariff_id_for_trial = trial_tariff.id
+            tariff_trial_days = getattr(trial_tariff, 'trial_duration_days', None)
+            if tariff_trial_days:
+                trial_duration = tariff_trial_days
+            logger.info(f'Using trial tariff {trial_tariff.name} (ID: {trial_tariff.id}) with squads: {trial_squads}')
+    except Exception as e:
+        logger.error(f'Error getting trial tariff: {e}')
 
     # Create trial subscription
     subscription = await create_trial_subscription(
@@ -1010,7 +1307,11 @@ async def _build_tariff_response(
                 )
 
     # Get promo group for discount calculation
+    # Use get_primary_promo_group() for correct promo group resolution
     promo_group = user.get_primary_promo_group() if user and hasattr(user, 'get_primary_promo_group') else None
+    if promo_group is None and user:
+        # Fallback to legacy promo_group attribute
+        promo_group = getattr(user, 'promo_group', None)
     promo_group_name = promo_group.name if promo_group else None
 
     # Вычисляем доп. устройства для текущего тарифа (при продлении)
@@ -1187,13 +1488,25 @@ async def get_purchase_options(
 
         # Tariffs mode - return list of tariffs
         if settings.is_tariffs_mode():
-            promo_group = getattr(user, 'promo_group', None)
+            # Use get_primary_promo_group() for correct promo group resolution
+            # (handles both legacy promo_group FK and new user_promo_groups M2M)
+            promo_group = user.get_primary_promo_group() if hasattr(user, 'get_primary_promo_group') else None
+            if promo_group is None:
+                # Fallback to legacy promo_group attribute
+                promo_group = getattr(user, 'promo_group', None)
             promo_group_id = promo_group.id if promo_group else None
             tariffs = await get_tariffs_for_user(db, promo_group_id)
 
             subscription = await get_subscription_by_user_id(db, user.id)
             current_tariff_id = subscription.tariff_id if subscription else None
             language = getattr(user, 'language', 'ru') or 'ru'
+
+            # Determine subscription status for frontend to decide purchase vs switch flow
+            subscription_status = None
+            subscription_is_expired = False
+            if subscription:
+                subscription_status = subscription.actual_status
+                subscription_is_expired = subscription_status == 'expired'
 
             tariff_responses = []
             for tariff in tariffs:
@@ -1206,6 +1519,10 @@ async def get_purchase_options(
                 'current_tariff_id': current_tariff_id,
                 'balance_kopeks': user.balance_kopeks,
                 'balance_label': settings.format_price(user.balance_kopeks),
+                # Include subscription status info for frontend decision making
+                'subscription_status': subscription_status,
+                'subscription_is_expired': subscription_is_expired,
+                'has_subscription': subscription is not None,
             }
 
         # Classic mode - return periods
@@ -1328,6 +1645,32 @@ async def submit_purchase(
                 )
             except Exception as notif_error:
                 logger.warning(f'Failed to send subscription notification to {user.email}: {notif_error}')
+
+        # Отправляем уведомление админам о покупке подписки
+        try:
+            from aiogram import Bot
+
+            from app.services.admin_notification_service import AdminNotificationService
+
+            if getattr(settings, 'ADMIN_NOTIFICATIONS_ENABLED', False) and settings.BOT_TOKEN:
+                bot = Bot(token=settings.BOT_TOKEN)
+                try:
+                    notification_service = AdminNotificationService(bot)
+                    is_new_subscription = result.get('was_trial_conversion') or not context.subscription
+                    await notification_service.send_subscription_purchase_notification(
+                        db=db,
+                        user=user,
+                        subscription=subscription,
+                        transaction=None,
+                        period_days=selection.period.days,
+                        was_trial_conversion=result.get('was_trial_conversion', False),
+                        amount_kopeks=pricing.final_total,
+                        purchase_type='renewal' if not is_new_subscription else None,
+                    )
+                finally:
+                    await bot.session.close()
+        except Exception as e:
+            logger.error(f'Failed to send admin notification for subscription purchase: {e}')
 
         return {
             'success': True,
@@ -1667,8 +2010,6 @@ async def purchase_tariff(
         # Save cart for auto-renewal (not for daily tariffs - they have their own charging)
         if not is_daily_tariff:
             try:
-                from app.services.user_cart_service import user_cart_service
-
                 cart_data = {
                     'cart_mode': 'extend',
                     'subscription_id': subscription.id,
@@ -1741,6 +2082,35 @@ async def purchase_tariff(
                 )
             except Exception as notif_error:
                 logger.warning(f'Failed to send subscription notification to {user.email}: {notif_error}')
+
+        # Отправляем уведомление админам о покупке/продлении тарифа
+        try:
+            from aiogram import Bot
+
+            from app.services.admin_notification_service import AdminNotificationService
+
+            if getattr(settings, 'ADMIN_NOTIFICATIONS_ENABLED', False) and settings.BOT_TOKEN:
+                bot = Bot(token=settings.BOT_TOKEN)
+                try:
+                    notification_service = AdminNotificationService(bot)
+                    # Определяем тип покупки: новая подписка или продление
+                    was_new_subscription = (
+                        subscription.start_date and (datetime.utcnow() - subscription.start_date).total_seconds() < 60
+                    )
+                    await notification_service.send_subscription_purchase_notification(
+                        db=db,
+                        user=user,
+                        subscription=subscription,
+                        transaction=None,
+                        period_days=period_days,
+                        was_trial_conversion=False,
+                        amount_kopeks=price_kopeks,
+                        purchase_type='renewal' if not was_new_subscription else None,
+                    )
+                finally:
+                    await bot.session.close()
+        except Exception as e:
+            logger.error(f'Failed to send admin notification for tariff purchase: {e}')
 
         return response
 
@@ -1822,31 +2192,73 @@ async def purchase_devices(
         days_left = max(1, (end_date - now).days)
         total_days = 30  # Base period for device price calculation
 
-        # Price = device_price * devices * (days_left / 30)
-        price_kopeks = int(device_price * request.devices * days_left / total_days)
-        price_kopeks = max(100, price_kopeks)  # Minimum 1 ruble
+        # Calculate base price before discount
+        base_price_per_month = device_price * request.devices
+        base_price_prorated = int(base_price_per_month * days_left / total_days)
+        base_price_prorated = max(100, base_price_prorated)  # Minimum 1 ruble
+
+        # Apply discount from promo group
+        period_hint_days = days_left
+        discount_result = _apply_addon_discount(user, 'devices', base_price_prorated, period_hint_days)
+        price_kopeks = discount_result['discounted']
+        devices_discount_percent = discount_result['percent']
+        discount_value = discount_result['discount']
+
+        # Ensure minimum price after discount (except for 100% discount)
+        if devices_discount_percent < 100:
+            price_kopeks = max(100, price_kopeks)
 
         # Check balance
         if user.balance_kopeks < price_kopeks:
             missing = price_kopeks - user.balance_kopeks
+
+            # Сохраняем корзину для автопокупки после пополнения
+            try:
+                cart_data = {
+                    'cart_mode': 'add_devices',
+                    'devices_to_add': request.devices,
+                    'price_kopeks': price_kopeks,
+                    'base_price_kopeks': base_price_prorated,
+                    'discount_percent': devices_discount_percent,
+                    'source': 'cabinet',
+                }
+                await user_cart_service.save_user_cart(user.id, cart_data)
+                logger.info(
+                    f'Cart saved for device purchase (cabinet) user {user.id}: '
+                    f'+{request.devices} devices, discount {devices_discount_percent}%'
+                )
+            except Exception as e:
+                logger.error(f'Error saving cart for device purchase (cabinet): {e}')
+
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 detail={
+                    'code': 'insufficient_funds',
                     'error': 'Insufficient balance',
                     'required_kopeks': price_kopeks,
                     'current_kopeks': user.balance_kopeks,
                     'missing_kopeks': missing,
+                    'cart_saved': True,
                 },
             )
 
-        # Deduct balance
+        # Deduct balance and create transaction
         from app.database.crud.user import subtract_user_balance
+        from app.database.models import PaymentMethod
+
+        # Build description with discount info
+        if devices_discount_percent > 0:
+            description = f'Покупка {request.devices} доп. устройств (скидка {devices_discount_percent}%)'
+        else:
+            description = f'Покупка {request.devices} доп. устройств'
 
         await subtract_user_balance(
             db=db,
             user=user,
             amount_kopeks=price_kopeks,
-            description=f'Покупка {request.devices} доп. устройств',
+            description=description,
+            create_transaction=True,
+            payment_method=PaymentMethod.BALANCE,
         )
 
         # Increase device limit
@@ -1866,9 +2278,39 @@ async def purchase_devices(
 
         await db.refresh(user)
 
-        logger.info(f'User {user.id} purchased {request.devices} devices for {price_kopeks} kopeks')
+        if devices_discount_percent > 0:
+            logger.info(
+                f'User {user.id} purchased {request.devices} devices for {price_kopeks} kopeks '
+                f'(discount {devices_discount_percent}%, saved {discount_value} kopeks)'
+            )
+        else:
+            logger.info(f'User {user.id} purchased {request.devices} devices for {price_kopeks} kopeks')
 
-        return {
+        # Отправляем уведомление админам
+        try:
+            from aiogram import Bot
+
+            from app.services.admin_notification_service import AdminNotificationService
+
+            if getattr(settings, 'ADMIN_NOTIFICATIONS_ENABLED', False) and settings.BOT_TOKEN:
+                bot = Bot(token=settings.BOT_TOKEN)
+                try:
+                    notification_service = AdminNotificationService(bot)
+                    await notification_service.send_subscription_update_notification(
+                        db=db,
+                        user=user,
+                        subscription=subscription,
+                        update_type='devices',
+                        old_value=current_devices,
+                        new_value=subscription.device_limit,
+                        price_paid=price_kopeks,
+                    )
+                finally:
+                    await bot.session.close()
+        except Exception as e:
+            logger.error(f'Failed to send admin notification for device purchase: {e}')
+
+        response = {
             'success': True,
             'message': f'Добавлено {request.devices} устройств',
             'devices_added': request.devices,
@@ -1879,6 +2321,13 @@ async def purchase_devices(
             'balance_label': settings.format_price(user.balance_kopeks),
         }
 
+        if devices_discount_percent > 0:
+            response['discount_percent'] = devices_discount_percent
+            response['discount_kopeks'] = discount_value
+            response['base_price_kopeks'] = base_price_prorated
+
+        return response
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1887,6 +2336,197 @@ async def purchase_devices(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail='Не удалось обработать покупку устройств',
         )
+
+
+@router.post('/traffic/save-cart')
+async def save_traffic_cart(
+    request: TrafficPurchaseRequest,
+    user: User = Depends(get_current_cabinet_user),
+    db: AsyncSession = Depends(get_cabinet_db),
+) -> dict[str, bool]:
+    """Save cart for traffic purchase (for insufficient balance flow)."""
+    from app.utils.pricing_utils import calculate_prorated_price
+
+    await db.refresh(user, ['subscription'])
+    subscription = user.subscription
+
+    if not subscription:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='У вас нет активной подписки',
+        )
+
+    if subscription.status not in ['active', 'trial']:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Ваша подписка неактивна',
+        )
+
+    if subscription.is_trial:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Докупка трафика недоступна на пробном периоде',
+        )
+
+    if subscription.traffic_limit_gb == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='У вас уже безлимитный трафик',
+        )
+
+    # Get traffic price from tariff or settings
+    tariff = None
+    base_price_kopeks = 0
+    is_tariff_mode = settings.is_tariffs_mode() and subscription.tariff_id
+
+    if is_tariff_mode:
+        tariff = await get_tariff_by_id(db, subscription.tariff_id)
+        if not tariff:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail='Тариф не найден',
+            )
+
+        if not getattr(tariff, 'traffic_topup_enabled', False):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Докупка трафика недоступна на вашем тарифе',
+            )
+
+        packages = tariff.get_traffic_topup_packages() if hasattr(tariff, 'get_traffic_topup_packages') else {}
+        if request.gb not in packages:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f'Пакет трафика {request.gb} ГБ недоступен',
+            )
+        base_price_kopeks = packages[request.gb]
+    else:
+        if not settings.is_traffic_topup_enabled():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Докупка трафика отключена',
+            )
+
+        packages = settings.get_traffic_topup_packages()
+        matching_pkg = next((pkg for pkg in packages if pkg['gb'] == request.gb and pkg.get('enabled', True)), None)
+        if not matching_pkg:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Недоступный пакет трафика',
+            )
+        base_price_kopeks = matching_pkg['price']
+
+    # Apply promo group discount
+    traffic_discount_percent = 0
+    promo_group = (
+        user.get_primary_promo_group()
+        if hasattr(user, 'get_primary_promo_group')
+        else getattr(user, 'promo_group', None)
+    )
+    if promo_group:
+        apply_to_addons = getattr(promo_group, 'apply_discounts_to_addons', True)
+        if apply_to_addons:
+            traffic_discount_percent = max(0, min(100, int(getattr(promo_group, 'traffic_discount_percent', 0) or 0)))
+
+    if traffic_discount_percent > 0:
+        base_price_kopeks = int(base_price_kopeks * (100 - traffic_discount_percent) / 100)
+
+    # Calculate prorated price
+    final_price, _ = calculate_prorated_price(
+        base_price_kopeks,
+        subscription.end_date,
+    )
+
+    # Save cart for auto-purchase after balance top-up
+    cart_data = {
+        'cart_mode': 'add_traffic',
+        'subscription_id': subscription.id,
+        'traffic_gb': request.gb,
+        'price_kopeks': final_price,
+        'base_price_kopeks': base_price_kopeks,
+        'discount_percent': traffic_discount_percent,
+        'source': 'cabinet',
+        'description': f'Докупка {request.gb} ГБ трафика',
+    }
+    await user_cart_service.save_user_cart(user.id, cart_data)
+    logger.info(f'Cart saved for traffic purchase (cabinet save-cart) user {user.id}: +{request.gb} GB')
+
+    return {'success': True, 'cart_saved': True}
+
+
+@router.post('/devices/save-cart')
+async def save_devices_cart(
+    request: DevicePurchaseRequest,
+    user: User = Depends(get_current_cabinet_user),
+    db: AsyncSession = Depends(get_cabinet_db),
+) -> dict[str, bool]:
+    """Save cart for device purchase (for insufficient balance flow)."""
+    await db.refresh(user, ['subscription'])
+    subscription = user.subscription
+
+    if not subscription:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='У вас нет активной подписки',
+        )
+
+    if subscription.status not in ['active', 'trial']:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Ваша подписка неактивна',
+        )
+
+    # Get tariff for device price (if exists)
+    tariff = None
+    if subscription.tariff_id:
+        tariff = await get_tariff_by_id(db, subscription.tariff_id)
+
+    # Determine device price and max limit from tariff or settings
+    if tariff and tariff.device_price_kopeks:
+        device_price = tariff.device_price_kopeks
+        max_device_limit = tariff.max_device_limit
+    else:
+        device_price = settings.PRICE_PER_DEVICE
+        max_device_limit = settings.MAX_DEVICES_LIMIT if settings.MAX_DEVICES_LIMIT > 0 else None
+
+    if not device_price or device_price <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Докупка устройств недоступна',
+        )
+
+    # Check max device limit
+    current_devices = subscription.device_limit or 1
+    new_device_count = current_devices + request.devices
+    if max_device_limit and new_device_count > max_device_limit:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Максимальное количество устройств: {max_device_limit}',
+        )
+
+    # Calculate prorated price based on remaining days
+    now = datetime.now(UTC)
+    end_date = subscription.end_date
+    if end_date.tzinfo is None:
+        end_date = end_date.replace(tzinfo=UTC)
+
+    days_left = max(1, (end_date - now).days)
+    total_days = 30
+
+    price_kopeks = int(device_price * request.devices * days_left / total_days)
+    price_kopeks = max(100, price_kopeks)  # Minimum 1 ruble
+
+    # Save cart for auto-purchase after balance top-up
+    cart_data = {
+        'cart_mode': 'add_devices',
+        'devices_to_add': request.devices,
+        'price_kopeks': price_kopeks,
+        'source': 'cabinet',
+    }
+    await user_cart_service.save_user_cart(user.id, cart_data)
+    logger.info(f'Cart saved for device purchase (cabinet save-cart) user {user.id}: +{request.devices} devices')
+
+    return {'success': True, 'cart_saved': True}
 
 
 @router.get('/devices/price')
@@ -1958,11 +2598,24 @@ async def get_device_price(
     days_left = max(1, (end_date - now).days)
     total_days = 30
 
-    price_per_device_kopeks = int(device_price * days_left / total_days)
-    price_per_device_kopeks = max(100, price_per_device_kopeks)
-    total_price_kopeks = price_per_device_kopeks * devices
+    # Calculate base price before discount
+    base_price_per_device = int(device_price * days_left / total_days)
+    base_price_per_device = max(100, base_price_per_device)
+    base_total_price = base_price_per_device * devices
 
-    return {
+    # Apply discount from promo group
+    period_hint_days = days_left
+    discount_result = _apply_addon_discount(user, 'devices', base_total_price, period_hint_days)
+    total_price_kopeks = discount_result['discounted']
+    devices_discount_percent = discount_result['percent']
+    discount_value = discount_result['discount']
+
+    # Calculate per-device price after discount
+    if devices_discount_percent < 100 and total_price_kopeks > 0:
+        total_price_kopeks = max(100, total_price_kopeks)
+    price_per_device_kopeks = total_price_kopeks // devices if devices > 0 else 0
+
+    response = {
         'available': True,
         'devices': devices,
         'price_per_device_kopeks': price_per_device_kopeks,
@@ -1975,6 +2628,14 @@ async def get_device_price(
         'days_left': days_left,
         'base_device_price_kopeks': device_price,
     }
+
+    # Add discount info if applicable
+    if devices_discount_percent > 0:
+        response['discount_percent'] = devices_discount_percent
+        response['discount_kopeks'] = discount_value
+        response['base_total_price_kopeks'] = base_total_price
+
+    return response
 
 
 # ============ App Config for Connection ============
@@ -2053,37 +2714,56 @@ def _convert_remnawave_block_to_step(block: dict[str, Any], url_scheme: str = ''
     return step
 
 
-def _extract_scheme_from_buttons(buttons: list[dict[str, Any]]) -> str:
-    """Extract URL scheme from buttons list."""
+def _extract_scheme_from_buttons(buttons: list[dict[str, Any]]) -> tuple[str, bool]:
+    """Extract URL scheme from buttons list.
+
+    Returns:
+        Tuple of (scheme, uses_crypto_link).
+        uses_crypto_link=True when the template is {{HAPP_CRYPT4_LINK}},
+        meaning subscription_crypto_link should be used as payload.
+    """
     for btn in buttons:
         if not isinstance(btn, dict):
             continue
         link = btn.get('link', '') or btn.get('url', '') or btn.get('buttonLink', '')
         if not link:
             continue
-        # Check for subscription link placeholder (case-insensitive)
         link_upper = link.upper()
+
+        # Check for {{HAPP_CRYPT4_LINK}} -- uses crypto link as payload
+        if '{{HAPP_CRYPT4_LINK}}' in link_upper or 'HAPP_CRYPT4_LINK' in link_upper:
+            scheme = re.sub(r'\{\{HAPP_CRYPT4_LINK\}\}', '', link, flags=re.IGNORECASE)
+            if scheme and '://' in scheme:
+                return scheme, True
+
+        # Check for {{SUBSCRIPTION_LINK}} -- uses plain subscription_url as payload
         if '{{SUBSCRIPTION_LINK}}' in link_upper or 'SUBSCRIPTION_LINK' in link_upper:
-            # Extract scheme: "prizrak-box://install-config?url={{SUBSCRIPTION_LINK}}" -> "prizrak-box://install-config?url="
             scheme = re.sub(r'\{\{SUBSCRIPTION_LINK\}\}', '', link, flags=re.IGNORECASE)
             if scheme and '://' in scheme:
-                return scheme
+                return scheme, False
+
         # Also check for type="subscriptionLink" buttons with custom schemes
         btn_type = btn.get('type', '')
         if btn_type == 'subscriptionLink' and '://' in link and not link.startswith('http'):
-            # Extract base scheme from link like "prizrak-box://install-config?url="
             scheme = link.split('{{')[0] if '{{' in link else link
             if scheme and '://' in scheme:
-                return scheme
-    return ''
+                return scheme, False
+    return '', False
 
 
-def _get_url_scheme_for_app(app: dict[str, Any]) -> str:
-    """Get URL scheme for app - from config, buttons, or fallback by name."""
-    # 1. Check urlScheme field
+def _get_url_scheme_for_app(app: dict[str, Any]) -> tuple[str, bool]:
+    """Get URL scheme for app - from config, buttons, or fallback by name.
+
+    Returns:
+        Tuple of (scheme, uses_crypto_link).
+        uses_crypto_link=True means the app template uses {{HAPP_CRYPT4_LINK}},
+        so subscription_crypto_link should be used as the deep link payload.
+    """
+    # 1. Check urlScheme field (cabinet format stores usesCryptoLink alongside)
     scheme = str(app.get('urlScheme', '')).strip()
     if scheme:
-        return scheme
+        uses_crypto = bool(app.get('usesCryptoLink', False))
+        return scheme, uses_crypto
 
     # 2. Extract from buttons in blocks (RemnaWave format)
     blocks = app.get('blocks', [])
@@ -2091,25 +2771,25 @@ def _get_url_scheme_for_app(app: dict[str, Any]) -> str:
         if not isinstance(block, dict):
             continue
         buttons = block.get('buttons', [])
-        scheme = _extract_scheme_from_buttons(buttons)
+        scheme, uses_crypto = _extract_scheme_from_buttons(buttons)
         if scheme:
-            return scheme
+            return scheme, uses_crypto
 
     # 3. Check buttons directly in app (alternative structure)
     direct_buttons = app.get('buttons', [])
     if direct_buttons:
-        scheme = _extract_scheme_from_buttons(direct_buttons)
+        scheme, uses_crypto = _extract_scheme_from_buttons(direct_buttons)
         if scheme:
-            return scheme
+            return scheme, uses_crypto
 
     # 4. Check in step structures (cabinet format)
     for step_key in ['installationStep', 'addSubscriptionStep', 'connectAndUseStep']:
         step = app.get(step_key, {})
         if isinstance(step, dict):
             step_buttons = step.get('buttons', [])
-            scheme = _extract_scheme_from_buttons(step_buttons)
+            scheme, uses_crypto = _extract_scheme_from_buttons(step_buttons)
             if scheme:
-                return scheme
+                return scheme, uses_crypto
 
     # No scheme found
     logger.debug(
@@ -2118,7 +2798,7 @@ def _get_url_scheme_for_app(app: dict[str, Any]) -> str:
         f'has buttons: {bool(app.get("buttons"))}, '
         f'has urlScheme: {bool(app.get("urlScheme"))}'
     )
-    return ''
+    return '', False
 
 
 def _find_subscription_block(blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -2130,10 +2810,11 @@ def _find_subscription_block(blocks: list[dict[str, Any]]) -> dict[str, Any] | N
         for btn in buttons:
             if not isinstance(btn, dict):
                 continue
-            # Check for subscriptionLink type or {{SUBSCRIPTION_LINK}} in link
+            # Check for subscriptionLink type, {{SUBSCRIPTION_LINK}}, or {{HAPP_CRYPT4_LINK}} in link
             btn_type = btn.get('type', '')
             link = btn.get('link', '') or btn.get('url', '')
-            if btn_type == 'subscriptionLink' or (link and 'SUBSCRIPTION_LINK' in link.upper()):
+            link_upper = link.upper() if link else ''
+            if btn_type == 'subscriptionLink' or 'SUBSCRIPTION_LINK' in link_upper or 'HAPP_CRYPT4_LINK' in link_upper:
                 return block
     return None
 
@@ -2156,7 +2837,7 @@ def _find_connect_block(blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
 def _convert_remnawave_app_to_cabinet(app: dict[str, Any]) -> dict[str, Any]:
     """Convert RemnaWave app format to cabinet app format."""
     blocks = app.get('blocks', [])
-    url_scheme = _get_url_scheme_for_app(app)
+    url_scheme, uses_crypto = _get_url_scheme_for_app(app)
 
     # Debug log for conversion (не логируем отсутствие urlScheme - для Happ это нормально)
     app_name = app.get('name', 'unknown')
@@ -2209,6 +2890,7 @@ def _convert_remnawave_app_to_cabinet(app: dict[str, Any]) -> dict[str, Any]:
         'name': app.get('name', ''),
         'isFeatured': app.get('featured', False),
         'urlScheme': url_scheme,
+        'usesCryptoLink': uses_crypto,
         'isNeedBase64Encoding': app.get('isNeedBase64Encoding', False),
         'installationStep': installation_step,
         'addSubscriptionStep': subscription_step,
@@ -2255,7 +2937,12 @@ def _convert_remnawave_config_to_cabinet(config: dict[str, Any]) -> dict[str, An
 
 
 async def _load_app_config_async() -> dict[str, Any]:
-    """Load app config from RemnaWave (if configured) or local file."""
+    """Load app config from RemnaWave (if configured) or local file.
+
+    When config comes from RemnaWave, returns the original format with
+    ``_isRemnawave`` flag so the caller can serve it as-is (enriched with
+    deep links) instead of converting to the legacy step-based format.
+    """
     remnawave_uuid = _get_remnawave_config_uuid()
 
     if remnawave_uuid:
@@ -2265,22 +2952,9 @@ async def _load_app_config_async() -> dict[str, Any]:
                 config = await api.get_subscription_page_config(remnawave_uuid)
                 if config and config.config:
                     logger.debug(f'Loaded app config from RemnaWave: {remnawave_uuid}')
-                    # Debug: log raw RemnaWave config structure
-                    import json
-
-                    logger.debug(
-                        f'RemnaWave raw config: {json.dumps(config.config, ensure_ascii=False, indent=2)[:2000]}'
-                    )
-                    converted = _convert_remnawave_config_to_cabinet(config.config)
-                    logger.debug(f'Converted config platforms: {list(converted.get("platforms", {}).keys())}')
-                    # Log first app from each platform
-                    for platform, apps in converted.get('platforms', {}).items():
-                        if apps:
-                            first_app = apps[0]
-                            logger.debug(
-                                f'Platform {platform} first app: name={first_app.get("name")}, urlScheme={first_app.get("urlScheme")}'
-                            )
-                    return converted
+                    raw = dict(config.config)
+                    raw['_isRemnawave'] = True
+                    return raw
         except Exception as e:
             logger.warning(f'Failed to load RemnaWave config, falling back to file: {e}')
 
@@ -2293,44 +2967,50 @@ def _load_app_config() -> dict[str, Any]:
     return _load_app_config_from_file()
 
 
-def _is_happ_app(app: dict[str, Any]) -> bool:
-    """Check if app is Happ (uses happ_cryptolink scheme)."""
-    name = str(app.get('name', '')).lower()
-    svg_icon_key = str(app.get('svgIconKey', '')).lower()
-    return name == 'happ' or svg_icon_key == 'happ'
-
-
 def _create_deep_link(
     app: dict[str, Any], subscription_url: str, subscription_crypto_link: str | None = None
 ) -> str | None:
     """Create deep link for app with subscription URL.
 
-    Uses urlScheme from RemnaWave config or fallback by app name.
-    For Happ apps, uses subscription_crypto_link directly (contains happ:// scheme).
+    Uses urlScheme from RemnaWave config (e.g. "happ://add/", "v2rayng://install-config?url=")
+    combined with the appropriate payload URL.
+
+    Two Happ schemes exist in RemnaWave:
+      - happ://add/{{SUBSCRIPTION_LINK}}       -> uses plain subscription_url
+      - happ://crypt4/{{HAPP_CRYPT4_LINK}}     -> uses subscription_crypto_link
     """
     if not isinstance(app, dict):
         return None
 
-    # For Happ, use crypto_link directly if available (already has happ:// scheme)
-    if _is_happ_app(app) and subscription_crypto_link:
-        return subscription_crypto_link
-
-    if not subscription_url:
+    if not subscription_url and not subscription_crypto_link:
         return None
 
-    scheme = _get_url_scheme_for_app(app)
+    scheme, uses_crypto = _get_url_scheme_for_app(app)
     if not scheme:
         logger.debug(f"_create_deep_link: no urlScheme for app '{app.get('name', 'unknown')}'")
         return None
 
-    payload = subscription_url
+    # Pick the correct payload based on which template the app uses
+    if uses_crypto:
+        if not subscription_crypto_link:
+            logger.debug(
+                f"_create_deep_link: app '{app.get('name', 'unknown')}' requires crypto link but none available"
+            )
+            return None
+        payload = subscription_crypto_link
+    else:
+        if not subscription_url:
+            logger.debug(
+                f"_create_deep_link: app '{app.get('name', 'unknown')}' requires subscription_url but none available"
+            )
+            return None
+        payload = subscription_url
 
     if app.get('isNeedBase64Encoding'):
         try:
-            payload = base64.b64encode(subscription_url.encode('utf-8')).decode('utf-8')
+            payload = base64.b64encode(payload.encode('utf-8')).decode('utf-8')
         except Exception as e:
-            logger.warning(f'Failed to encode subscription URL to base64: {e}')
-            payload = subscription_url
+            logger.warning(f'Failed to encode payload to base64: {e}')
 
     return f'{scheme}{payload}'
 
@@ -2536,7 +3216,10 @@ async def update_countries(
         added_server_ids = await get_server_ids_by_uuids(db, added)
         if added_server_ids:
             await add_subscription_servers(db, user.subscription, added_server_ids, added_server_prices)
-            await add_user_to_servers(db, added_server_ids)
+            try:
+                await add_user_to_servers(db, added_server_ids)
+            except Exception as e:
+                logger.error(f'Ошибка обновления счётчика серверов: {e}')
 
     # Update connected squads
     user.subscription.connected_squads = selected_countries
@@ -2661,6 +3344,29 @@ async def get_happ_downloads(
     }
 
 
+def _resolve_button_url(
+    url: str,
+    subscription_url: str | None,
+    subscription_crypto_link: str | None,
+) -> str:
+    """Resolve template variables in button URLs.
+
+    Matches remnawave/subscription-page frontend TemplateEngine:
+    - {{SUBSCRIPTION_LINK}} -> plain subscription URL
+    - {{HAPP_CRYPT3_LINK}} -> crypto link
+    - {{HAPP_CRYPT4_LINK}} -> crypto link
+    """
+    if not url:
+        return url
+    result = url
+    if subscription_url:
+        result = result.replace('{{SUBSCRIPTION_LINK}}', subscription_url)
+    if subscription_crypto_link:
+        result = result.replace('{{HAPP_CRYPT3_LINK}}', subscription_crypto_link)
+        result = result.replace('{{HAPP_CRYPT4_LINK}}', subscription_crypto_link)
+    return result
+
+
 @router.get('/app-config')
 async def get_app_config(
     user: User = Depends(get_current_cabinet_user),
@@ -2677,13 +3383,97 @@ async def get_app_config(
 
     # Load config from RemnaWave (if configured) or local file
     config = await _load_app_config_async()
-    platforms_raw = config.get('platforms', {})
 
+    is_remnawave = config.pop('_isRemnawave', False)
+    hide_link = settings.should_hide_subscription_link()
+
+    # Строим platformNames из displayName каждой платформы RemnaWave
+    platform_names: dict[str, Any] = {}
+    for pk, pd in config.get('platforms', {}).items():
+        if isinstance(pd, dict) and 'displayName' in pd:
+            platform_names[pk] = pd['displayName']
+    # Фоллбэк для платформ без displayName (en достаточно)
+    fallback_names = {
+        'ios': {'en': 'iPhone/iPad'},
+        'android': {'en': 'Android'},
+        'macos': {'en': 'macOS'},
+        'windows': {'en': 'Windows'},
+        'linux': {'en': 'Linux'},
+        'androidTV': {'en': 'Android TV'},
+        'appleTV': {'en': 'Apple TV'},
+    }
+    for k, v in fallback_names.items():
+        if k not in platform_names:
+            platform_names[k] = v
+
+    if is_remnawave:
+        # ── RemnaWave original format ──
+        # Serve original blocks/svgLibrary enriched with deep links and resolved URLs.
+        platforms: dict[str, Any] = {}
+        for platform_key, platform_data in config.get('platforms', {}).items():
+            if not isinstance(platform_data, dict):
+                continue
+            apps = platform_data.get('apps', [])
+            if not isinstance(apps, list):
+                continue
+
+            enriched_apps = []
+            for app in apps:
+                if not isinstance(app, dict):
+                    continue
+
+                # Generate deep link
+                deep_link = None
+                if subscription_url or subscription_crypto_link:
+                    deep_link = _create_deep_link(app, subscription_url, subscription_crypto_link)
+                app['deepLink'] = deep_link
+
+                # Resolve templates only for subscriptionLink and copyButton (not external)
+                for block in app.get('blocks', []):
+                    if not isinstance(block, dict):
+                        continue
+                    for btn in block.get('buttons', []):
+                        if not isinstance(btn, dict):
+                            continue
+                        btn_type = btn.get('type', '')
+                        if btn_type in ('subscriptionLink', 'copyButton'):
+                            url = btn.get('url', '') or btn.get('link', '')
+                            if url and '{{' in url:
+                                btn['resolvedUrl'] = _resolve_button_url(
+                                    url,
+                                    subscription_url,
+                                    subscription_crypto_link,
+                                )
+
+                enriched_apps.append(app)
+
+            if enriched_apps:
+                # Сохраняем platform-level поля (svgIconKey, displayName и т.д.)
+                platform_output = {k: v for k, v in platform_data.items() if k != 'apps'}
+                platform_output['apps'] = enriched_apps
+                platforms[platform_key] = platform_output
+
+        return {
+            'isRemnawave': True,
+            'platforms': platforms,
+            'svgLibrary': config.get('svgLibrary', {}),
+            'baseTranslations': config.get('baseTranslations'),
+            'baseSettings': config.get('baseSettings'),
+            'uiConfig': config.get('uiConfig', {}),
+            'platformNames': platform_names,
+            'hasSubscription': bool(subscription_url or subscription_crypto_link),
+            'subscriptionUrl': subscription_url,
+            'subscriptionCryptoLink': subscription_crypto_link,
+            'hideLink': hide_link,
+            'branding': config.get('brandingSettings', {}),
+        }
+
+    # ── Legacy file-based format ──
+    platforms_raw = config.get('platforms', {})
     if not isinstance(platforms_raw, dict):
         platforms_raw = {}
 
-    # Build response with deep links
-    platforms = {}
+    platforms_legacy: dict[str, Any] = {}
     for platform_key, apps in platforms_raw.items():
         if not isinstance(apps, list):
             continue
@@ -2711,23 +3501,10 @@ async def get_app_config(
             platform_apps.append(app_data)
 
         if platform_apps:
-            platforms[platform_key] = platform_apps
-
-    # Platform display names for UI
-    platform_names = {
-        'ios': {'ru': 'iPhone/iPad', 'en': 'iPhone/iPad'},
-        'android': {'ru': 'Android', 'en': 'Android'},
-        'macos': {'ru': 'macOS', 'en': 'macOS'},
-        'windows': {'ru': 'Windows', 'en': 'Windows'},
-        'linux': {'ru': 'Linux', 'en': 'Linux'},
-        'androidTV': {'ru': 'Android TV', 'en': 'Android TV'},
-        'appleTV': {'ru': 'Apple TV', 'en': 'Apple TV'},
-    }
-
-    hide_link = settings.should_hide_subscription_link()
+            platforms_legacy[platform_key] = platform_apps
 
     return {
-        'platforms': platforms,
+        'platforms': platforms_legacy,
         'platformNames': platform_names,
         'hasSubscription': bool(subscription_url or subscription_crypto_link),
         'subscriptionUrl': subscription_url if not hide_link else None,
@@ -2911,6 +3688,210 @@ async def delete_all_devices(
         )
 
 
+# ============ Device Reduction ============
+
+
+@router.get('/devices/reduction-info')
+async def get_device_reduction_info(
+    user: User = Depends(get_current_cabinet_user),
+    db: AsyncSession = Depends(get_cabinet_db),
+) -> dict[str, Any]:
+    """Get info about device limit reduction availability."""
+    from app.services.remnawave_service import RemnaWaveService
+
+    await db.refresh(user, ['subscription'])
+
+    if not user.subscription:
+        return {
+            'available': False,
+            'reason': 'No subscription found',
+            'current_device_limit': 0,
+            'min_device_limit': 1,
+            'can_reduce': 0,
+            'connected_devices_count': 0,
+        }
+
+    subscription = user.subscription
+
+    # Check if it's a trial subscription
+    if subscription.is_trial:
+        return {
+            'available': False,
+            'reason': 'Device reduction is not available for trial subscriptions',
+            'current_device_limit': subscription.device_limit or 1,
+            'min_device_limit': 1,
+            'can_reduce': 0,
+            'connected_devices_count': 0,
+        }
+
+    # Get tariff info for min device limit
+    tariff = None
+    min_device_limit = 1
+    if subscription.tariff_id:
+        tariff = await get_tariff_by_id(db, subscription.tariff_id)
+        if tariff:
+            min_device_limit = getattr(tariff, 'device_limit', 1) or 1
+
+    current_device_limit = subscription.device_limit or 1
+
+    # Can't reduce below minimum
+    if current_device_limit <= min_device_limit:
+        return {
+            'available': False,
+            'reason': 'Already at minimum device limit for your tariff',
+            'current_device_limit': current_device_limit,
+            'min_device_limit': min_device_limit,
+            'can_reduce': 0,
+            'connected_devices_count': 0,
+        }
+
+    # Get connected devices count
+    connected_devices_count = 0
+    if user.remnawave_uuid:
+        try:
+            service = RemnaWaveService()
+            async with service.get_api_client() as api:
+                response = await api._make_request('GET', f'/api/hwid/devices/{user.remnawave_uuid}')
+                if response and 'response' in response:
+                    connected_devices_count = response['response'].get('total', 0)
+        except Exception as e:
+            logger.error(f'Error getting connected devices count: {e}')
+
+    can_reduce = current_device_limit - min_device_limit
+
+    return {
+        'available': True,
+        'current_device_limit': current_device_limit,
+        'min_device_limit': min_device_limit,
+        'can_reduce': can_reduce,
+        'connected_devices_count': connected_devices_count,
+    }
+
+
+@router.post('/devices/reduce')
+async def reduce_devices(
+    request: dict[str, int],
+    user: User = Depends(get_current_cabinet_user),
+    db: AsyncSession = Depends(get_cabinet_db),
+) -> dict[str, Any]:
+    """Reduce device limit (no refund)."""
+    from app.services.remnawave_service import RemnaWaveService
+
+    new_device_limit = request.get('new_device_limit')
+    if not new_device_limit or new_device_limit < 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Invalid new_device_limit',
+        )
+
+    await db.refresh(user, ['subscription'])
+
+    if not user.subscription:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='No subscription found',
+        )
+
+    subscription = user.subscription
+
+    if subscription.is_trial:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Device reduction is not available for trial subscriptions',
+        )
+
+    # Get tariff info for min device limit
+    tariff = None
+    min_device_limit = 1
+    if subscription.tariff_id:
+        tariff = await get_tariff_by_id(db, subscription.tariff_id)
+        if tariff:
+            min_device_limit = getattr(tariff, 'device_limit', 1) or 1
+
+    current_device_limit = subscription.device_limit or 1
+
+    # Validate new limit
+    if new_device_limit >= current_device_limit:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='New device limit must be less than current limit',
+        )
+
+    if new_device_limit < min_device_limit:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Cannot reduce below minimum device limit ({min_device_limit}) for your tariff',
+        )
+
+    # Get connected devices and remove excess (last connected ones)
+    connected_devices_count = 0
+    devices_removed_count = 0
+    if user.remnawave_uuid:
+        try:
+            service = RemnaWaveService()
+            async with service.get_api_client() as api:
+                response = await api._make_request('GET', f'/api/hwid/devices/{user.remnawave_uuid}')
+                if response and 'response' in response:
+                    devices_list = response['response'].get('devices', [])
+                    connected_devices_count = len(devices_list)
+
+                    # If connected devices exceed new limit, remove excess (last connected)
+                    if connected_devices_count > new_device_limit:
+                        devices_to_remove = connected_devices_count - new_device_limit
+                        logger.info(
+                            f'Removing {devices_to_remove} excess devices for user {user.id}: '
+                            f'had {connected_devices_count}, new limit {new_device_limit}'
+                        )
+
+                        # Sort by date (oldest first) and remove the last ones
+                        sorted_devices = sorted(
+                            devices_list,
+                            key=lambda d: d.get('updatedAt') or d.get('createdAt') or '',
+                        )
+                        devices_to_delete = sorted_devices[-devices_to_remove:]
+
+                        for device in devices_to_delete:
+                            device_hwid = device.get('hwid')
+                            if device_hwid:
+                                try:
+                                    delete_data = {'userUuid': user.remnawave_uuid, 'hwid': device_hwid}
+                                    await api._make_request('POST', '/api/hwid/devices/delete', data=delete_data)
+                                    devices_removed_count += 1
+                                    logger.info(f'Removed device {device_hwid} for user {user.id}')
+                                except Exception as del_error:
+                                    logger.error(f'Error removing device {device_hwid}: {del_error}')
+        except Exception as e:
+            logger.error(f'Error checking/removing devices: {e}')
+
+    old_device_limit = current_device_limit
+
+    # Update subscription
+    subscription.device_limit = new_device_limit
+    subscription.updated_at = datetime.utcnow()
+    await db.commit()
+
+    # Update RemnaWave
+    try:
+        subscription_service = SubscriptionService()
+        await subscription_service.update_remnawave_user(db, subscription)
+    except Exception as e:
+        logger.error(f'Error updating RemnaWave user: {e}')
+
+    logger.info(
+        f'User {user.id} reduced device limit from {old_device_limit} to {new_device_limit}'
+        + (f' (removed {devices_removed_count} devices)' if devices_removed_count > 0 else '')
+    )
+
+    return {
+        'success': True,
+        'message': 'Device limit reduced successfully'
+        + (f' ({devices_removed_count} devices removed)' if devices_removed_count > 0 else ''),
+        'old_device_limit': old_device_limit,
+        'new_device_limit': new_device_limit,
+        'devices_removed': devices_removed_count,
+    }
+
+
 # ============ Tariff Switch ============
 
 
@@ -2935,10 +3916,26 @@ async def preview_tariff_switch(
             detail='No active subscription with tariff',
         )
 
-    if user.subscription.status not in ('active', 'trial'):
+    # Use actual_status for correct status check (handles time-based expiration)
+    actual_status = user.subscription.actual_status
+    if actual_status == 'expired':
+        # For expired subscriptions, user should purchase a new tariff, not switch
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail='Subscription is not active',
+            detail={
+                'code': 'subscription_expired',
+                'message': 'Subscription is expired. Please purchase a new tariff instead of switching.',
+                'use_purchase_flow': True,
+            },
+        )
+    if actual_status not in ('active', 'trial'):
+        # For disabled/pending subscriptions, block switching with generic error
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': 'subscription_not_active',
+                'message': f'Subscription is not active (status: {actual_status}). Cannot switch tariff.',
+            },
         )
 
     current_tariff = await get_tariff_by_id(db, user.subscription.tariff_id)
@@ -2957,7 +3954,10 @@ async def preview_tariff_switch(
         )
 
     # Check tariff availability for user's promo group
-    promo_group = getattr(user, 'promo_group', None)
+    # Use get_primary_promo_group() for correct promo group resolution
+    promo_group = user.get_primary_promo_group() if hasattr(user, 'get_primary_promo_group') else None
+    if promo_group is None:
+        promo_group = getattr(user, 'promo_group', None)
     promo_group_id = promo_group.id if promo_group else None
     if not new_tariff.is_available_for_promo_group(promo_group_id):
         raise HTTPException(
@@ -2996,18 +3996,35 @@ async def preview_tariff_switch(
             return int(min_price * 30 / min_period)
         return 0
 
+    # Get period discount percent for cost calculation
+    period_discount_percent = _get_period_discount_percent(user, remaining_days if remaining_days > 0 else 30)
+    base_upgrade_cost = 0
+    discount_value = 0
+
     if switching_to_daily:
         # Switching TO daily - pay first day price
         daily_price = getattr(new_tariff, 'daily_price_kopeks', 0)
-        upgrade_cost = daily_price
-        is_upgrade = daily_price > 0
+        base_upgrade_cost = daily_price
+        # Apply discount to daily price
+        if period_discount_percent > 0 and base_upgrade_cost > 0:
+            discount_value = int(base_upgrade_cost * period_discount_percent / 100)
+            upgrade_cost = base_upgrade_cost - discount_value
+        else:
+            upgrade_cost = base_upgrade_cost
+        is_upgrade = upgrade_cost > 0
     elif switching_from_daily:
         # Switching FROM daily TO periodic - full payment for new tariff
         min_period_price = 0
         if new_tariff.period_prices:
             min_period_price = min(new_tariff.period_prices.values())
-        upgrade_cost = min_period_price
-        is_upgrade = min_period_price > 0
+        base_upgrade_cost = min_period_price
+        # Apply discount
+        if period_discount_percent > 0 and base_upgrade_cost > 0:
+            discount_value = int(base_upgrade_cost * period_discount_percent / 100)
+            upgrade_cost = base_upgrade_cost - discount_value
+        else:
+            upgrade_cost = base_upgrade_cost
+        is_upgrade = upgrade_cost > 0
     else:
         # Calculate proportional cost difference using monthly prices
         current_monthly = get_monthly_price(current_tariff)
@@ -3017,18 +4034,25 @@ async def preview_tariff_switch(
 
         if price_diff > 0:
             # Upgrade - pay proportional difference
-            upgrade_cost = int(price_diff * remaining_days / 30)
+            base_upgrade_cost = int(price_diff * remaining_days / 30)
+            # Apply discount to upgrade cost
+            if period_discount_percent > 0 and base_upgrade_cost > 0:
+                discount_value = int(base_upgrade_cost * period_discount_percent / 100)
+                upgrade_cost = base_upgrade_cost - discount_value
+            else:
+                upgrade_cost = base_upgrade_cost
             is_upgrade = True
         else:
             # Downgrade or same - free
             upgrade_cost = 0
+            base_upgrade_cost = 0
             is_upgrade = False
 
     balance = user.balance_kopeks or 0
     has_enough = balance >= upgrade_cost
     missing = max(0, upgrade_cost - balance) if not has_enough else 0
 
-    return {
+    response = {
         'can_switch': has_enough,
         'current_tariff_id': current_tariff.id if current_tariff else None,
         'current_tariff_name': current_tariff.name if current_tariff else None,
@@ -3044,6 +4068,14 @@ async def preview_tariff_switch(
         'missing_amount_label': settings.format_price(missing) if missing > 0 else '',
         'is_upgrade': is_upgrade,
     }
+
+    # Add discount info if applicable
+    if period_discount_percent > 0 and discount_value > 0:
+        response['discount_percent'] = period_discount_percent
+        response['discount_kopeks'] = discount_value
+        response['base_upgrade_cost_kopeks'] = base_upgrade_cost
+
+    return response
 
 
 @router.post('/tariff/switch')
@@ -3069,10 +4101,26 @@ async def switch_tariff(
             detail='No active subscription with tariff',
         )
 
-    if user.subscription.status not in ('active', 'trial'):
+    # Use actual_status for correct status check (handles time-based expiration)
+    actual_status = user.subscription.actual_status
+    if actual_status == 'expired':
+        # For expired subscriptions, user should purchase a new tariff, not switch
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail='Subscription is not active',
+            detail={
+                'code': 'subscription_expired',
+                'message': 'Subscription is expired. Please purchase a new tariff instead of switching.',
+                'use_purchase_flow': True,
+            },
+        )
+    if actual_status not in ('active', 'trial'):
+        # For disabled/pending subscriptions, block switching with generic error
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': 'subscription_not_active',
+                'message': f'Subscription is not active (status: {actual_status}). Cannot switch tariff.',
+            },
         )
 
     current_tariff = await get_tariff_by_id(db, user.subscription.tariff_id)
@@ -3091,7 +4139,10 @@ async def switch_tariff(
         )
 
     # Check tariff availability
-    promo_group = getattr(user, 'promo_group', None)
+    # Use get_primary_promo_group() for correct promo group resolution
+    promo_group = user.get_primary_promo_group() if hasattr(user, 'get_primary_promo_group') else None
+    if promo_group is None:
+        promo_group = getattr(user, 'promo_group', None)
     promo_group_id = promo_group.id if promo_group else None
     if not new_tariff.is_available_for_promo_group(promo_group_id):
         raise HTTPException(
@@ -3111,6 +4162,11 @@ async def switch_tariff(
     switching_from_daily = current_is_daily and not new_is_daily
     switching_to_daily = not current_is_daily and new_is_daily
 
+    # Get period discount percent for cost calculation
+    period_discount_percent = _get_period_discount_percent(user, remaining_days if remaining_days > 0 else 30)
+    base_upgrade_cost = 0
+    discount_value = 0
+
     if switching_to_daily:
         # Switching TO daily tariff - charge first day price
         daily_price = getattr(new_tariff, 'daily_price_kopeks', 0)
@@ -3119,7 +4175,13 @@ async def switch_tariff(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail='Daily tariff has invalid price',
             )
-        upgrade_cost = daily_price
+        base_upgrade_cost = daily_price
+        # Apply discount
+        if period_discount_percent > 0 and base_upgrade_cost > 0:
+            discount_value = int(base_upgrade_cost * period_discount_percent / 100)
+            upgrade_cost = base_upgrade_cost - discount_value
+        else:
+            upgrade_cost = base_upgrade_cost
         new_period_days = 1  # Daily tariff starts with 1 day
     elif switching_from_daily:
         # Switch FROM daily to regular tariff - pay for minimum period
@@ -3128,7 +4190,13 @@ async def switch_tariff(
         if new_tariff.period_prices:
             min_period_days = min(int(k) for k in new_tariff.period_prices.keys())
             min_period_price = new_tariff.period_prices.get(str(min_period_days), 0)
-        upgrade_cost = min_period_price
+        base_upgrade_cost = min_period_price
+        # Apply discount
+        if period_discount_percent > 0 and base_upgrade_cost > 0:
+            discount_value = int(base_upgrade_cost * period_discount_percent / 100)
+            upgrade_cost = base_upgrade_cost - discount_value
+        else:
+            upgrade_cost = base_upgrade_cost
         new_period_days = min_period_days
     else:
         # Regular tariff switch - calculate proportional cost difference using monthly prices
@@ -3153,9 +4221,16 @@ async def switch_tariff(
         price_diff = new_monthly - current_monthly
 
         if price_diff > 0:
-            upgrade_cost = int(price_diff * remaining_days / 30)
+            base_upgrade_cost = int(price_diff * remaining_days / 30)
+            # Apply discount
+            if period_discount_percent > 0 and base_upgrade_cost > 0:
+                discount_value = int(base_upgrade_cost * period_discount_percent / 100)
+                upgrade_cost = base_upgrade_cost - discount_value
+            else:
+                upgrade_cost = base_upgrade_cost
         else:
             upgrade_cost = 0
+            base_upgrade_cost = 0
         new_period_days = 0
 
     # Charge if upgrade
@@ -3177,6 +4252,10 @@ async def switch_tariff(
             description = f"Переход с суточного на тариф '{new_tariff.name}' ({new_period_days} дней)"
         else:
             description = f"Переход на тариф '{new_tariff.name}' (доплата за {remaining_days} дней)"
+
+        # Add discount info to description if applicable
+        if period_discount_percent > 0 and discount_value > 0:
+            description += f' (скидка {period_discount_percent}%)'
 
         success = await subtract_user_balance(db, user, upgrade_cost, description)
         if not success:
@@ -3232,12 +4311,50 @@ async def switch_tariff(
     except Exception as e:
         logger.error(f'Failed to sync tariff switch with RemnaWave: {e}')
 
+    # Reset all devices on tariff switch
+    devices_reset = False
+    if user.remnawave_uuid:
+        try:
+            service = RemnaWaveService()
+            async with service.get_api_client() as api:
+                await api.reset_user_devices(user.remnawave_uuid)
+                devices_reset = True
+                logger.info(f'Reset all devices for user {user.id} on tariff switch')
+        except Exception as e:
+            logger.error(f'Failed to reset devices on tariff switch: {e}')
+
     await db.refresh(user)
     await db.refresh(user.subscription)
 
-    return {
+    # Отправляем уведомление админам о смене тарифа
+    try:
+        from aiogram import Bot
+
+        from app.services.admin_notification_service import AdminNotificationService
+
+        if getattr(settings, 'ADMIN_NOTIFICATIONS_ENABLED', False) and settings.BOT_TOKEN:
+            bot = Bot(token=settings.BOT_TOKEN)
+            try:
+                notification_service = AdminNotificationService(bot)
+                await notification_service.send_subscription_purchase_notification(
+                    db=db,
+                    user=user,
+                    subscription=user.subscription,
+                    transaction=None,
+                    period_days=remaining_days if remaining_days > 0 else new_period_days,
+                    was_trial_conversion=False,
+                    amount_kopeks=upgrade_cost,
+                    purchase_type='tariff_switch',
+                )
+            finally:
+                await bot.session.close()
+    except Exception as e:
+        logger.error(f'Failed to send admin notification for tariff switch: {e}')
+
+    response = {
         'success': True,
-        'message': f"Switched from '{old_tariff_name}' to '{new_tariff.name}'",
+        'message': f"Switched from '{old_tariff_name}' to '{new_tariff.name}'"
+        + (' (devices reset)' if devices_reset else ''),
         'subscription': _subscription_to_response(user.subscription),
         'old_tariff_name': old_tariff_name,
         'new_tariff_id': new_tariff.id,
@@ -3246,6 +4363,14 @@ async def switch_tariff(
         'balance_kopeks': user.balance_kopeks,
         'balance_label': settings.format_price(user.balance_kopeks),
     }
+
+    # Add discount info if applicable
+    if period_discount_percent > 0 and discount_value > 0:
+        response['discount_percent'] = period_discount_percent
+        response['discount_kopeks'] = discount_value
+        response['base_charged_kopeks'] = base_upgrade_cost
+
+    return response
 
 
 # ============ Daily Subscription Pause ============
@@ -3286,6 +4411,11 @@ async def toggle_subscription_pause(
     new_paused_state = not is_currently_paused
     user.subscription.is_daily_paused = new_paused_state
 
+    # Сохраняем статус ДО изменения для проверки RemnaWave
+    from app.database.models import SubscriptionStatus
+
+    was_disabled = user.subscription.status == SubscriptionStatus.DISABLED.value
+
     # If resuming, check balance
     if not new_paused_state:
         daily_price = getattr(tariff, 'daily_price_kopeks', 0)
@@ -3301,9 +4431,7 @@ async def toggle_subscription_pause(
             )
 
         # Restore ACTIVE status if was DISABLED
-        from app.database.models import SubscriptionStatus
-
-        if user.subscription.status == SubscriptionStatus.DISABLED.value:
+        if was_disabled:
             user.subscription.status = SubscriptionStatus.ACTIVE.value
             user.subscription.last_daily_charge_at = datetime.utcnow()
             user.subscription.end_date = datetime.utcnow() + timedelta(days=1)
@@ -3312,14 +4440,15 @@ async def toggle_subscription_pause(
     await db.refresh(user.subscription)
     await db.refresh(user)
 
-    # Sync with RemnaWave when resuming
-    if not new_paused_state:
+    # Sync with RemnaWave only when resuming from DISABLED state
+    # При паузе НЕ отключаем - пользователь может пользоваться до конца оплаченного периода
+    # При возобновлении включаем только если подписка была отключена (DISABLED)
+    if not new_paused_state and user.remnawave_uuid and was_disabled:
         try:
             subscription_service = SubscriptionService()
-            if user.remnawave_uuid:
-                await subscription_service.enable_remnawave_user(user.remnawave_uuid)
+            await subscription_service.enable_remnawave_user(user.remnawave_uuid)
         except Exception as e:
-            logger.error(f'Error syncing with RemnaWave on resume: {e}')
+            logger.error(f'Error enabling RemnaWave user on resume: {e}')
 
     if new_paused_state:
         message = 'Daily subscription paused'

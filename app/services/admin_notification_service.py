@@ -288,9 +288,7 @@ class AdminNotificationService:
                 return False
 
             user_status = '🆕 Новый' if not user.has_had_paid_subscription else '🔄 Существующий'
-            referrer_info = await self._get_referrer_info(db, user.referred_by_id)
             promo_group = await self._get_user_promo_group(db, user)
-            promo_block = self._format_promo_group_block(promo_group)
             user_display = self._get_user_display(user)
 
             trial_device_limit = subscription.device_limit
@@ -308,32 +306,78 @@ class AdminNotificationService:
             user_id_label = self._get_user_identifier_label(user)
             user_id_display = self._get_user_identifier_display(user)
 
-            message = f"""🎯 <b>АКТИВАЦИЯ ТРИАЛА</b>
+            # Получаем название тарифа (если режим тарифов)
+            tariff_name = await self._get_tariff_name(db, subscription)
 
-👤 <b>Пользователь:</b> {user_display}
-🆔 <b>{user_id_label}:</b> {user_id_display}
-📱 <b>Username:</b> @{getattr(user, 'username', None) or 'отсутствует'}
-👥 <b>Статус:</b> {user_status}
+            message_lines = [
+                '🎯 <b>АКТИВАЦИЯ ТРИАЛА</b>',
+                '',
+                f'👤 <b>Пользователь:</b> {user_display}',
+                f'🆔 <b>{user_id_label}:</b> {user_id_display}',
+                f'📱 <b>Username:</b> @{getattr(user, "username", None) or "отсутствует"}',
+                f'👥 <b>Статус:</b> {user_status}',
+                '',
+            ]
 
-{promo_block}
+            # Промогруппа — только название, без скидок
+            if promo_group:
+                message_lines.append(f'🏷️ <b>Промогруппа:</b> {promo_group.name}')
+            else:
+                message_lines.append('🏷️ <b>Промогруппа:</b> —')
 
-⏰ <b>Параметры триала:</b>
-📅 Период: {settings.TRIAL_DURATION_DAYS} дней
-📊 Трафик: {self._format_traffic(settings.TRIAL_TRAFFIC_LIMIT_GB)}
-📱 Устройства: {trial_device_limit}
-🌐 Сервер: {subscription.connected_squads[0] if subscription.connected_squads else 'По умолчанию'}
-{payment_block}
+            # Тариф триала (если есть)
+            if tariff_name:
+                message_lines.append(f'📦 <b>Тариф:</b> {tariff_name}')
 
-📆 <b>Действует до:</b> {format_local_datetime(subscription.end_date, '%d.%m.%Y %H:%M')}
-🔗 <b>Реферер:</b> {referrer_info}
+            message_lines.append('')
 
-⏰ <i>{format_local_datetime(datetime.utcnow(), '%d.%m.%Y %H:%M:%S')}</i>"""
+            message_lines.extend(
+                [
+                    '⏰ <b>Параметры триала:</b>',
+                    f'📅 Период: {settings.TRIAL_DURATION_DAYS} дней',
+                    f'📊 Трафик: {self._format_traffic(settings.TRIAL_TRAFFIC_LIMIT_GB)}',
+                    f'📱 Устройства: {trial_device_limit}',
+                    f'🌐 Сервер: {subscription.connected_squads[0] if subscription.connected_squads else "По умолчанию"}',
+                ]
+            )
 
-            return await self._send_message(message)
+            if payment_block:
+                message_lines.append(payment_block)
+
+            message_lines.append('')
+            message_lines.append(
+                f'📆 <b>Действует до:</b> {format_local_datetime(subscription.end_date, "%d.%m.%Y %H:%M")}'
+            )
+
+            # Реферер — только если есть
+            if user.referred_by_id:
+                referrer_info = await self._get_referrer_info(db, user.referred_by_id)
+                if referrer_info != 'Нет':
+                    message_lines.append(f'🔗 <b>Реферер:</b> {referrer_info}')
+
+            message_lines.append('')
+            message_lines.append(f'⏰ <i>{format_local_datetime(datetime.utcnow(), "%d.%m.%Y %H:%M:%S")}</i>')
+
+            return await self._send_message('\n'.join(message_lines))
 
         except Exception as e:
             logger.error(f'Ошибка отправки уведомления о триале: {e}')
             return False
+
+    async def _get_tariff_name(self, db: AsyncSession, subscription: Subscription) -> str | None:
+        """Получает название тарифа подписки, если он есть."""
+        if not subscription.tariff_id:
+            return None
+
+        try:
+            from app.database.crud.tariff import get_tariff_by_id
+
+            tariff = await get_tariff_by_id(db, subscription.tariff_id)
+            if tariff:
+                return tariff.name
+        except Exception:
+            pass
+        return None
 
     async def send_subscription_purchase_notification(
         self,
@@ -344,6 +388,7 @@ class AdminNotificationService:
         period_days: int,
         was_trial_conversion: bool = False,
         amount_kopeks: int | None = None,
+        purchase_type: str | None = None,  # 'tariff_switch', 'renewal', None (auto)
     ) -> bool:
         try:
             total_amount = (
@@ -371,93 +416,138 @@ class AdminNotificationService:
             if not self._is_enabled():
                 return False
 
-            event_type = '🔄 КОНВЕРСИЯ ИЗ ТРИАЛА' if was_trial_conversion else '💎 ПОКУПКА ПОДПИСКИ'
-
-            if was_trial_conversion:
-                user_status = '🎯 Конверсия из триала'
-            elif user.has_had_paid_subscription:
-                user_status = '🔄 Продление/Обновление'
+            # Определяем тип операции и заголовок
+            if purchase_type == 'tariff_switch':
+                event_title = '🔄 СМЕНА ТАРИФА'
+                user_status = 'Смена тарифа'
+            elif was_trial_conversion:
+                event_title = '🔄 КОНВЕРСИЯ ИЗ ТРИАЛА'
+                user_status = 'Конверсия'
+            elif purchase_type == 'renewal' or user.has_had_paid_subscription:
+                event_title = '💎 ПРОДЛЕНИЕ ПОДПИСКИ'
+                user_status = 'Продление'
             else:
-                user_status = '🆕 Первая покупка'
+                event_title = '💎 ПОКУПКА ПОДПИСКИ'
+                user_status = 'Первая покупка'
+
+            # Получаем название тарифа
+            tariff_name = await self._get_tariff_name(db, subscription)
 
             servers_info = await self._get_servers_info(subscription.connected_squads)
             payment_method = self._get_payment_method_display(transaction.payment_method) if transaction else 'Баланс'
-            referrer_info = await self._get_referrer_info(db, user.referred_by_id)
-            promo_group = await self._get_user_promo_group(db, user)
-            promo_block = self._format_promo_group_block(promo_group)
             user_display = self._get_user_display(user)
-
-            transaction_id = transaction.id if transaction else '—'
-            user_id_label = self._get_user_identifier_label(user)
             user_id_display = self._get_user_identifier_display(user)
 
-            message = f"""💎 <b>{event_type}</b>
+            # Формируем компактное сообщение
+            message_lines = [
+                f'<b>{event_title}</b>',
+                '',
+                f'👤 {user_display} ({user_id_display})',
+            ]
 
-👤 <b>Пользователь:</b> {user_display}
-🆔 <b>{user_id_label}:</b> {user_id_display}
-📱 <b>Username:</b> @{getattr(user, 'username', None) or 'отсутствует'}
-👥 <b>Статус:</b> {user_status}
+            # Добавляем username только если есть
+            username = getattr(user, 'username', None)
+            if username:
+                message_lines.append(f'📱 @{username}')
 
-{promo_block}
+            message_lines.append(f'📋 {user_status}')
 
-💰 <b>Платеж:</b>
-💵 Сумма: {settings.format_price(total_amount)}
-💳 Способ: {payment_method}
-🆔 ID транзакции: {transaction_id}
+            # Тариф (если есть)
+            if tariff_name:
+                message_lines.append(f'🏷️ Тариф: <b>{tariff_name}</b>')
 
-📱 <b>Параметры подписки:</b>
-📅 Период: {period_days} дней
-📊 Трафик: {self._format_traffic(subscription.traffic_limit_gb)}
-📱 Устройства: {subscription.device_limit}
-🌐 Серверы: {servers_info}
+            message_lines.extend(
+                [
+                    '',
+                    f'💵 <b>{settings.format_price(total_amount)}</b> • {payment_method}',
+                    f'📅 {period_days} дн. • до {format_local_datetime(subscription.end_date, "%d.%m.%Y")}',
+                    f'📊 {self._format_traffic(subscription.traffic_limit_gb)} • 📱 {subscription.device_limit} устр.',
+                    f'🌐 {servers_info}',
+                ]
+            )
 
-📆 <b>Действует до:</b> {format_local_datetime(subscription.end_date, '%d.%m.%Y %H:%M')}
-💰 <b>Баланс после покупки:</b> {settings.format_price(user.balance_kopeks)}
-🔗 <b>Реферер:</b> {referrer_info}
+            # Баланс после покупки
+            message_lines.append(f'💰 Баланс: {settings.format_price(user.balance_kopeks)}')
 
-⏰ <i>{format_local_datetime(datetime.utcnow(), '%d.%m.%Y %H:%M:%S')}</i>"""
+            # Реферер (только если есть)
+            if user.referred_by_id:
+                referrer_info = await self._get_referrer_info(db, user.referred_by_id)
+                if referrer_info != 'Нет':
+                    message_lines.append(f'🔗 Реф: {referrer_info}')
 
-            return await self._send_message(message)
+            # ID транзакции (только если есть)
+            if transaction:
+                message_lines.append(f'🆔 #{transaction.id}')
+
+            message_lines.extend(
+                [
+                    '',
+                    f'<i>{format_local_datetime(datetime.utcnow(), "%d.%m.%Y %H:%M")}</i>',
+                ]
+            )
+
+            return await self._send_message('\n'.join(message_lines))
 
         except Exception as e:
             logger.error(f'Ошибка отправки уведомления о покупке: {e}')
             return False
 
     async def send_version_update_notification(self, current_version: str, latest_version, total_updates: int) -> bool:
-        """Отправляет уведомление о новых обновлениях"""
+        """Отправляет уведомление о новых обновлениях."""
         if not self._is_enabled():
             return False
 
         try:
+            from app.utils.markdown_to_telegram import github_markdown_to_telegram_html, truncate_for_blockquote
+
+            repo = getattr(settings, 'VERSION_CHECK_REPO', 'fr1ngg/remnawave-bedolaga-telegram-bot')
+            release_url = f'https://github.com/{repo}/releases/tag/{latest_version.tag_name}'
+            repo_url = f'https://github.com/{repo}'
+            timestamp = format_local_datetime(datetime.utcnow(), '%d.%m.%Y %H:%M:%S')
+
             if latest_version.prerelease:
-                update_type = '🧪 ПРЕДВАРИТЕЛЬНАЯ ВЕРСИЯ'
-                type_icon = '🧪'
+                header = '🧪 <b>Pre-release</b>'
             elif latest_version.is_dev:
-                update_type = '🔧 DEV ВЕРСИЯ'
-                type_icon = '🔧'
+                header = '🔧 <b>Dev build</b>'
             else:
-                update_type = '📦 НОВАЯ ВЕРСИЯ'
-                type_icon = '📦'
+                header = '🆕 <b>Доступно обновление</b>'
 
-            description = latest_version.short_description
-            if len(description) > 200:
-                description = description[:197] + '...'
+            # -- message prefix (everything before blockquote) --
+            prefix_lines = [
+                header,
+                '',
+                f'<code>{current_version}</code>  →  <b><a href="{release_url}">{latest_version.tag_name}</a></b>',
+                f'📅 {latest_version.formatted_date}',
+                '',
+            ]
+            message_prefix = '\n'.join(prefix_lines)
 
-            message = f"""{type_icon} <b>{update_type} ДОСТУПНА</b>
+            # -- message suffix (everything after blockquote) --
+            suffix_lines = ['']
+            if total_updates > 1:
+                suffix_lines.append(f'Доступно обновлений: <b>{total_updates}</b>')
+            suffix_lines.extend(
+                [
+                    f'<a href="{repo_url}">Репозиторий</a>',
+                    '',
+                    f'<i>{timestamp}</i>',
+                ]
+            )
+            message_suffix = '\n'.join(suffix_lines)
 
-    📦 <b>Текущая версия:</b> <code>{current_version}</code>
-    🆕 <b>Новая версия:</b> <code>{latest_version.tag_name}</code>
-    📅 <b>Дата релиза:</b> {latest_version.formatted_date}
+            # -- description in blockquote --
+            raw_description = getattr(latest_version, 'full_description', '') or latest_version.short_description
+            description_html = github_markdown_to_telegram_html(raw_description)
 
-    📝 <b>Описание:</b>
-    {description}
-
-    🔢 <b>Всего доступно обновлений:</b> {total_updates}
-    🔗 <b>Репозиторий:</b> https://github.com/{getattr(self, 'repo', 'fr1ngg/remnawave-bedolaga-telegram-bot')}
-
-    ℹ️ Для обновления перезапустите контейнер с новым тегом или обновите код из репозитория.
-
-    ⚙️ <i>Автоматическая проверка обновлений • {format_local_datetime(datetime.utcnow(), '%d.%m.%Y %H:%M:%S')}</i>"""
+            if description_html:
+                description_html = truncate_for_blockquote(
+                    description_html,
+                    message_prefix=message_prefix,
+                    message_suffix=message_suffix,
+                )
+                message = f'{message_prefix}<blockquote expandable>{description_html}</blockquote>{message_suffix}'
+            else:
+                message = f'{message_prefix}{message_suffix}'
 
             return await self._send_message(message)
 
@@ -500,35 +590,81 @@ class AdminNotificationService:
         payment_method = self._get_payment_method_display(transaction.payment_method)
         balance_change = user.balance_kopeks - old_balance
         subscription_status = self._get_subscription_status(subscription)
-        promo_block = self._format_promo_group_block(promo_group)
         timestamp = format_local_datetime(datetime.utcnow(), '%d.%m.%Y %H:%M:%S')
         user_display = self._get_user_display(user)
-        user_id_label = self._get_user_identifier_label(user)
         user_id_display = self._get_user_identifier_display(user)
 
-        return f"""💰 <b>ПОПОЛНЕНИЕ БАЛАНСА</b>
+        # --- Основной блок ---
+        message_lines: list[str] = [
+            '💰 <b>ПОПОЛНЕНИЕ БАЛАНСА</b>',
+            '',
+            f'👤 {user_display} ({user_id_display})',
+        ]
 
-👤 <b>Пользователь:</b> {user_display}
-🆔 <b>{user_id_label}:</b> {user_id_display}
-📱 <b>Username:</b> @{getattr(user, 'username', None) or 'отсутствует'}
-💳 <b>Статус:</b> {topup_status}
+        username = getattr(user, 'username', None)
+        if username:
+            message_lines.append(f'📱 @{username}')
 
-{promo_block}
+        message_lines.append(f'💳 {topup_status}')
 
-💰 <b>Детали пополнения:</b>
-💵 Сумма: {settings.format_price(transaction.amount_kopeks)}
-💳 Способ: {payment_method}
-🆔 ID транзакции: {transaction.id}
+        # Промогруппа -- только название
+        if promo_group:
+            message_lines.append(f'🏷️ Промогруппа: {promo_group.name}')
 
-💰 <b>Баланс:</b>
-📉 Было: {settings.format_price(old_balance)}
-📈 Стало: {settings.format_price(user.balance_kopeks)}
-➕ Изменение: +{settings.format_price(balance_change)}
+        message_lines.append('')
 
-🔗 <b>Реферер:</b> {referrer_info}
-📱 <b>Подписка:</b> {subscription_status}
+        # --- Детали пополнения ---
+        message_lines.extend(
+            [
+                f'💵 <b>{settings.format_price(transaction.amount_kopeks)}</b> | {payment_method}',
+                '',
+                f'📉 {settings.format_price(old_balance)} → 📈 {settings.format_price(user.balance_kopeks)}'
+                f' (<b>+{settings.format_price(balance_change)}</b>)',
+            ]
+        )
 
-⏰ <i>{timestamp}</i>"""
+        # --- Подписка ---
+        message_lines.append(f'📱 Подписка: {subscription_status}')
+
+        # --- Реферер (только если есть) ---
+        if referrer_info and referrer_info != 'Нет':
+            message_lines.append(f'🔗 Реферер: {referrer_info}')
+
+        # --- Expandable blockquote с техническими деталями ---
+        detail_lines: list[str] = [
+            f'ID транзакции: {transaction.id}',
+            f'Способ оплаты: {transaction.payment_method or "balance"}',
+        ]
+
+        if transaction.external_id:
+            detail_lines.append(f'Внешний ID: {transaction.external_id}')
+
+        if transaction.description:
+            desc = transaction.description
+            if len(desc) > 120:
+                desc = desc[:117] + '...'
+            detail_lines.append(f'Описание: {desc}')
+
+        if transaction.created_at:
+            detail_lines.append(f'Создана: {format_local_datetime(transaction.created_at, "%d.%m.%Y %H:%M:%S")}')
+
+        if transaction.completed_at:
+            detail_lines.append(f'Завершена: {format_local_datetime(transaction.completed_at, "%d.%m.%Y %H:%M:%S")}')
+
+        if transaction.receipt_uuid:
+            detail_lines.append(f'Чек UUID: {transaction.receipt_uuid}')
+
+        blockquote_body = '\n'.join(detail_lines)
+        message_lines.extend(
+            [
+                '',
+                f'<blockquote expandable>{blockquote_body}</blockquote>',
+            ]
+        )
+
+        message_lines.append(f'<i>{timestamp}</i>')
+
+        return '\n'.join(message_lines)
 
     async def _reload_topup_notification_entities(
         self,
@@ -1080,22 +1216,43 @@ class AdminNotificationService:
     def _is_enabled(self) -> bool:
         return self.enabled and bool(self.chat_id)
 
+    @property
+    def is_enabled(self) -> bool:
+        """Public check for whether admin notifications are configured and active."""
+        return self._is_enabled()
+
+    async def send_webhook_notification(self, text: str) -> bool:
+        """Send a generic webhook/infrastructure notification to admin chat.
+
+        Used by RemnaWaveWebhookService for node, service, and CRM events.
+        The caller is responsible for HTML-escaping all untrusted data in `text`.
+        """
+        if not self._is_enabled():
+            return False
+        return await self._send_message(text)
+
     def _get_payment_method_display(self, payment_method: str | None) -> str:
-        mulenpay_name = settings.get_mulenpay_display_name()
-        method_names = {
+        if not payment_method:
+            return '💰 С баланса'
+
+        method_names: dict[str, str] = {
             'telegram_stars': '⭐ Telegram Stars',
             'yookassa': '💳 YooKassa (карта)',
             'tribute': '💎 Tribute (карта)',
-            'mulenpay': f'💳 {mulenpay_name} (карта)',
-            'pal24': '🏦 PayPalych (СБП)',
+            'mulenpay': f'💳 {settings.get_mulenpay_display_name()} (карта)',
+            'pal24': f'🏦 {settings.get_pal24_display_name()} (СБП)',
+            'cryptobot': f'🪙 {settings.get_cryptobot_display_name()} (крипто)',
+            'heleket': f'🪙 {settings.get_heleket_display_name()} (крипто)',
+            'wata': f'💳 {settings.get_wata_display_name()}',
+            'platega': f'💳 {settings.get_platega_display_name()}',
+            'cloudpayments': f'💳 {settings.get_cloudpayments_display_name()}',
+            'freekassa': f'💳 {settings.get_freekassa_display_name()}',
+            'kassa_ai': f'💳 {settings.get_kassa_ai_display_name()}',
             'manual': '🛠️ Вручную (админ)',
             'balance': '💰 С баланса',
         }
 
-        if not payment_method:
-            return '💰 С баланса'
-
-        return method_names.get(payment_method, '💰 С баланса')
+        return method_names.get(payment_method, f'💳 {payment_method}')
 
     def _format_traffic(self, traffic_gb: int) -> str:
         if traffic_gb == 0:
@@ -1369,65 +1526,76 @@ class AdminNotificationService:
             return False
 
         try:
-            referrer_info = await self._get_referrer_info(db, user.referred_by_id)
-            promo_group = await self._get_user_promo_group(db, user)
-            promo_block = self._format_promo_group_block(promo_group)
             user_display = self._get_user_display(user)
-
-            update_types = {
-                'traffic': ('📊 ИЗМЕНЕНИЕ ТРАФИКА', 'трафик'),
-                'devices': ('📱 ИЗМЕНЕНИЕ УСТРОЙСТВ', 'количество устройств'),
-                'servers': ('🌐 ИЗМЕНЕНИЕ СЕРВЕРОВ', 'серверы'),
-                'modem': ('📡 ИЗМЕНЕНИЕ МОДЕМА', 'модем'),
-            }
-
-            title, param_name = update_types.get(update_type, ('⚙️ ИЗМЕНЕНИЕ ПОДПИСКИ', 'параметры'))
-            user_id_label = self._get_user_identifier_label(user)
             user_id_display = self._get_user_identifier_display(user)
 
+            # Определяем заголовок по типу операции
+            update_titles = {
+                'traffic': '📊 ДОКУПКА ТРАФИКА',
+                'devices': '📱 ДОКУПКА УСТРОЙСТВ',
+                'servers': '🌐 СМЕНА СЕРВЕРОВ',
+            }
+            title = update_titles.get(update_type, '⚙️ ИЗМЕНЕНИЕ ПОДПИСКИ')
+
+            # Получаем название тарифа
+            tariff_name = await self._get_tariff_name(db, subscription)
+
+            # Формируем компактное сообщение
             message_lines = [
-                f'{title}',
+                f'<b>{title}</b>',
                 '',
-                f'👤 <b>Пользователь:</b> {user_display}',
-                f'🆔 <b>{user_id_label}:</b> {user_id_display}',
-                f'📱 <b>Username:</b> @{getattr(user, "username", None) or "отсутствует"}',
-                '',
-                promo_block,
-                '',
-                '🔧 <b>Изменение:</b>',
-                f'📋 Параметр: {param_name}',
+                f'👤 {user_display} ({user_id_display})',
             ]
 
+            # Добавляем username только если есть
+            username = getattr(user, 'username', None)
+            if username:
+                message_lines.append(f'📱 @{username}')
+
+            # Тариф (если есть)
+            if tariff_name:
+                message_lines.append(f'🏷️ Тариф: <b>{tariff_name}</b>')
+
+            message_lines.append('')
+
+            # Форматируем изменение в зависимости от типа
             if update_type == 'servers':
                 old_servers_info = await self._format_servers_detailed(old_value)
                 new_servers_info = await self._format_servers_detailed(new_value)
-                message_lines.extend(
-                    [
-                        f'📉 Было: {old_servers_info}',
-                        f'📈 Стало: {new_servers_info}',
-                    ]
-                )
+                message_lines.append(f'🔄 {old_servers_info} → {new_servers_info}')
+            elif update_type == 'traffic':
+                old_formatted = self._format_update_value(old_value, update_type)
+                new_formatted = self._format_update_value(new_value, update_type)
+                message_lines.append(f'🔄 {old_formatted} → {new_formatted}')
+            elif update_type == 'devices':
+                message_lines.append(f'🔄 {old_value} → {new_value} устр.')
             else:
-                message_lines.extend(
-                    [
-                        f'📉 Было: {self._format_update_value(old_value, update_type)}',
-                        f'📈 Стало: {self._format_update_value(new_value, update_type)}',
-                    ]
-                )
+                message_lines.append(f'🔄 {old_value} → {new_value}')
 
+            # Стоимость операции
             if price_paid > 0:
-                message_lines.append(f'💰 Доплачено: {settings.format_price(price_paid)}')
+                message_lines.append(f'💵 <b>{settings.format_price(price_paid)}</b>')
             else:
                 message_lines.append('💸 Бесплатно')
 
             message_lines.extend(
                 [
                     '',
-                    f'📅 <b>Подписка действует до:</b> {format_local_datetime(subscription.end_date, "%d.%m.%Y %H:%M")}',
-                    f'💰 <b>Баланс после операции:</b> {settings.format_price(user.balance_kopeks)}',
-                    f'🔗 <b>Рефер:</b> {referrer_info}',
+                    f'📅 До {format_local_datetime(subscription.end_date, "%d.%m.%Y")}',
+                    f'💰 Баланс: {settings.format_price(user.balance_kopeks)}',
+                ]
+            )
+
+            # Реферер (только если есть)
+            if user.referred_by_id:
+                referrer_info = await self._get_referrer_info(db, user.referred_by_id)
+                if referrer_info != 'Нет':
+                    message_lines.append(f'🔗 Реф: {referrer_info}')
+
+            message_lines.extend(
+                [
                     '',
-                    f'⏰ <i>{format_local_datetime(datetime.utcnow(), "%d.%m.%Y %H:%M:%S")}</i>',
+                    f'<i>{format_local_datetime(datetime.utcnow(), "%d.%m.%Y %H:%M")}</i>',
                 ]
             )
 
@@ -1465,8 +1633,6 @@ class AdminNotificationService:
             if isinstance(value, list):
                 return f'{len(value)} серверов'
             return str(value)
-        if update_type == 'modem':
-            return '✅ Включён' if value else '❌ Выключен'
         return str(value)
 
     async def send_bulk_ban_notification(

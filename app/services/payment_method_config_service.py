@@ -164,42 +164,78 @@ async def ensure_payment_method_configs(db: AsyncSession) -> None:
     """Initialize payment method configs if they don't exist yet.
 
     Called on startup to seed defaults from env vars.
+    Also adds any missing methods that were added after initial setup.
     """
-    count_result = await db.execute(select(func.count()).select_from(PaymentMethodConfig))
-    count = count_result.scalar() or 0
+    # Get existing method IDs
+    existing_result = await db.execute(select(PaymentMethodConfig.method_id))
+    existing_method_ids = set(existing_result.scalars().all())
 
-    if count > 0:
-        return  # Already initialized
+    if not existing_method_ids:
+        # First-time initialization
+        logger.info('Initializing payment method configurations from env vars...')
+        defaults = _get_method_defaults()
 
-    logger.info('Initializing payment method configurations from env vars...')
+        for idx, method_id in enumerate(DEFAULT_METHOD_ORDER):
+            method_def = defaults.get(method_id, {})
+            is_configured = method_def.get('is_configured', False)
+            sub_options = None
+            available = method_def.get('available_sub_options')
+            if available:
+                # Enable all sub-options by default
+                sub_options = {opt['id']: True for opt in available}
 
+            config = PaymentMethodConfig(
+                method_id=method_id,
+                sort_order=idx,
+                is_enabled=is_configured,
+                display_name=None,
+                sub_options=sub_options,
+                min_amount_kopeks=None,
+                max_amount_kopeks=None,
+                user_type_filter='all',
+                first_topup_filter='any',
+                promo_group_filter_mode='all',
+            )
+            db.add(config)
+
+        await db.commit()
+        logger.info(f'Payment method configurations initialized ({len(DEFAULT_METHOD_ORDER)} methods).')
+        return
+
+    # Add missing methods (for cases when new methods are added to code)
     defaults = _get_method_defaults()
+    missing_methods = [m for m in DEFAULT_METHOD_ORDER if m not in existing_method_ids]
 
-    for idx, method_id in enumerate(DEFAULT_METHOD_ORDER):
-        method_def = defaults.get(method_id, {})
-        is_configured = method_def.get('is_configured', False)
-        sub_options = None
-        available = method_def.get('available_sub_options')
-        if available:
-            # Enable all sub-options by default
-            sub_options = {opt['id']: True for opt in available}
+    if missing_methods:
+        logger.info(f'Adding missing payment methods: {missing_methods}')
+        # Get max sort_order to append new methods at the end
+        max_order_result = await db.execute(select(func.max(PaymentMethodConfig.sort_order)))
+        max_order = max_order_result.scalar() or 0
 
-        config = PaymentMethodConfig(
-            method_id=method_id,
-            sort_order=idx,
-            is_enabled=is_configured,
-            display_name=None,
-            sub_options=sub_options,
-            min_amount_kopeks=None,
-            max_amount_kopeks=None,
-            user_type_filter='all',
-            first_topup_filter='any',
-            promo_group_filter_mode='all',
-        )
-        db.add(config)
+        for idx, method_id in enumerate(missing_methods, start=max_order + 1):
+            method_def = defaults.get(method_id, {})
+            is_configured = method_def.get('is_configured', False)
+            sub_options = None
+            available = method_def.get('available_sub_options')
+            if available:
+                sub_options = {opt['id']: True for opt in available}
 
-    await db.commit()
-    logger.info(f'Payment method configurations initialized ({len(DEFAULT_METHOD_ORDER)} methods).')
+            config = PaymentMethodConfig(
+                method_id=method_id,
+                sort_order=idx,
+                is_enabled=is_configured,
+                display_name=None,
+                sub_options=sub_options,
+                min_amount_kopeks=None,
+                max_amount_kopeks=None,
+                user_type_filter='all',
+                first_topup_filter='any',
+                promo_group_filter_mode='all',
+            )
+            db.add(config)
+
+        await db.commit()
+        logger.info(f'Added {len(missing_methods)} missing payment method(s).')
 
 
 # ============ CRUD ============
@@ -280,3 +316,108 @@ async def get_all_promo_groups(db: AsyncSession) -> list[PromoGroup]:
     """Get all promo groups for the filter selector."""
     result = await db.execute(select(PromoGroup).order_by(PromoGroup.priority.desc(), PromoGroup.name))
     return list(result.scalars().all())
+
+
+# ============ User-facing methods ============
+
+
+async def get_enabled_methods_for_user(
+    db: AsyncSession,
+    user: 'User | None' = None,
+    is_first_topup: bool | None = None,
+) -> list[dict]:
+    """Get payment methods available for a specific user.
+
+    Applies all filters from PaymentMethodConfig:
+    - is_enabled
+    - is_provider_configured (from env)
+    - user_type_filter
+    - first_topup_filter
+    - promo_group_filter
+
+    Returns list of dicts with method info ready for API response.
+    """
+    from app.database.models import UserPromoGroup
+
+    configs = await get_all_configs(db)
+    defaults = _get_method_defaults()
+
+    result = []
+
+    for config in configs:
+        method_id = config.method_id
+        method_def = defaults.get(method_id, {})
+
+        # Skip if not enabled in admin panel
+        if not config.is_enabled:
+            continue
+
+        # Skip if provider not configured in env
+        if not method_def.get('is_configured', False):
+            continue
+
+        # Apply user_type_filter
+        if user and config.user_type_filter != 'all':
+            if config.user_type_filter == 'telegram' and not user.telegram_id:
+                continue
+            if config.user_type_filter == 'email' and not getattr(user, 'email', None):
+                continue
+
+        # Apply first_topup_filter
+        if config.first_topup_filter != 'any' and is_first_topup is not None:
+            if config.first_topup_filter == 'yes' and not is_first_topup:
+                continue
+            if config.first_topup_filter == 'no' and is_first_topup:
+                continue
+
+        # Apply promo_group_filter
+        if config.promo_group_filter_mode == 'selected' and user:
+            allowed_group_ids = {pg.id for pg in config.allowed_promo_groups}
+            if allowed_group_ids:
+                # Get user's promo groups
+                user_groups_result = await db.execute(
+                    select(UserPromoGroup.promo_group_id).where(UserPromoGroup.user_id == user.id)
+                )
+                user_group_ids = set(user_groups_result.scalars().all())
+
+                # Check if user has at least one allowed group
+                if not user_group_ids.intersection(allowed_group_ids):
+                    continue
+
+        # Build display name
+        display_name = config.display_name or method_def.get('default_display_name', method_id)
+
+        # Build min/max amounts (DB overrides env defaults)
+        min_amount = (
+            config.min_amount_kopeks if config.min_amount_kopeks is not None else method_def.get('default_min', 1000)
+        )
+        max_amount = (
+            config.max_amount_kopeks
+            if config.max_amount_kopeks is not None
+            else method_def.get('default_max', 10000000)
+        )
+
+        # Build options (filter by sub_options config)
+        options = None
+        available_sub_options = method_def.get('available_sub_options')
+        if available_sub_options and config.sub_options:
+            enabled_options = []
+            for opt in available_sub_options:
+                opt_id = opt['id']
+                if config.sub_options.get(opt_id, True):
+                    enabled_options.append(opt)
+            if enabled_options:
+                options = enabled_options
+
+        result.append(
+            {
+                'id': method_id,
+                'name': display_name,
+                'min_amount_kopeks': min_amount,
+                'max_amount_kopeks': max_amount,
+                'options': options,
+                'sort_order': config.sort_order,
+            }
+        )
+
+    return result

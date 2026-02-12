@@ -29,10 +29,9 @@ from app.database.crud.promo_group import get_auto_assign_promo_groups
 from app.database.crud.promo_offer_template import get_promo_offer_template_by_id
 from app.database.crud.rules import get_rules_by_language
 from app.database.crud.server_squad import (
-    add_user_to_servers,
     get_available_server_squads,
     get_server_squad_by_uuid,
-    remove_user_from_servers,
+    update_server_user_counts,
 )
 from app.database.crud.subscription import (
     add_subscription_servers,
@@ -3047,6 +3046,9 @@ def _is_trial_available_for_user(user: User) -> bool:
     if settings.TRIAL_DURATION_DAYS <= 0:
         return False
 
+    if settings.is_trial_disabled_for_user(getattr(user, 'auth_type', 'telegram')):
+        return False
+
     if getattr(user, 'has_had_paid_subscription', False):
         return False
 
@@ -3698,7 +3700,22 @@ async def update_subscription_autopay_endpoint(
     subscription = _ensure_paid_subscription(user)
     _validate_subscription_id(payload.subscription_id, subscription)
 
+    # Суточные подписки имеют свой механизм продления (DailySubscriptionService),
+    # глобальный autopay для них запрещён
     target_enabled = bool(payload.enabled) if payload.enabled is not None else bool(subscription.autopay_enabled)
+    if target_enabled:
+        try:
+            await db.refresh(subscription, ['tariff'])
+        except Exception:
+            pass
+        if subscription.tariff and getattr(subscription.tariff, 'is_daily', False):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail={
+                    'code': 'autopay_not_available_for_daily',
+                    'message': 'Autopay is not available for daily subscriptions',
+                },
+            )
 
     requested_days = payload.days_before
     normalized_days = _normalize_autopay_days(requested_days)
@@ -4036,7 +4053,7 @@ async def activate_subscription_trial_endpoint(
 
     language_code = _normalize_language_code(user)
     charged_amount_label = settings.format_price(charged_amount) if charged_amount > 0 else None
-    if language_code == 'ru':
+    if language_code in {'ru', 'fa'}:
         if duration_days:
             message = f'Триал активирован на {duration_days} дн. Приятного пользования!'
         else:
@@ -4047,7 +4064,7 @@ async def activate_subscription_trial_endpoint(
         message = 'Trial activated successfully. Enjoy!'
 
     if charged_amount_label:
-        if language_code == 'ru':
+        if language_code in {'ru', 'fa'}:
             message = f'{message}\n\n💳 С вашего баланса списано {charged_amount_label}.'
         else:
             message = f'{message}\n\n💳 {charged_amount_label} has been deducted from your balance.'
@@ -4458,7 +4475,7 @@ def _normalize_language_code(user: User | None) -> str:
 
 def _build_renewal_status_message(user: User | None) -> str:
     language_code = _normalize_language_code(user)
-    if language_code == 'ru':
+    if language_code in {'ru', 'fa'}:
         return 'Стоимость указана с учётом ваших текущих серверов, трафика и устройств.'
     return 'Prices already include your current servers, traffic, and devices.'
 
@@ -4475,7 +4492,7 @@ def _build_promo_offer_payload(user: User | None) -> dict[str, Any] | None:
         payload['expires_at'] = expires_at
 
     language_code = _normalize_language_code(user)
-    if language_code == 'ru':
+    if language_code in {'ru', 'fa'}:
         payload['message'] = 'Дополнительная скидка применяется автоматически.'
     else:
         payload['message'] = 'Extra discount is applied automatically.'
@@ -4509,7 +4526,7 @@ def _build_renewal_success_message(
     amount_label = settings.format_price(max(0, charged_amount))
     date_label = format_local_datetime(subscription.end_date, '%d.%m.%Y %H:%M') if subscription.end_date else ''
 
-    if language_code == 'ru':
+    if language_code in {'ru', 'fa'}:
         if charged_amount > 0:
             message = (
                 f'Подписка продлена до {date_label}. ' if date_label else 'Подписка продлена. '
@@ -4525,7 +4542,7 @@ def _build_renewal_success_message(
 
     if promo_discount_value > 0:
         discount_label = settings.format_price(promo_discount_value)
-        if language_code == 'ru':
+        if language_code in {'ru', 'fa'}:
             message += f' Применена дополнительная скидка {discount_label}.'
         else:
             message += f' Promo discount applied: {discount_label}.'
@@ -4542,7 +4559,7 @@ def _build_renewal_pending_message(
     amount_label = settings.format_price(max(0, missing_amount))
     method_title = _format_payment_method_title(method)
 
-    if language_code == 'ru':
+    if language_code in {'ru', 'fa'}:
         if method_title:
             return (
                 f'Недостаточно средств на балансе. Доплатите {amount_label} через {method_title}, '
@@ -5908,7 +5925,6 @@ async def update_subscription_servers_endpoint(
 
     if added_server_ids:
         await add_subscription_servers(db, subscription, added_server_ids, added_server_prices)
-        await add_user_to_servers(db, added_server_ids)
 
     removed_server_ids = [
         catalog[uuid].get('server_id') for uuid in removed if catalog[uuid].get('server_id') is not None
@@ -5916,7 +5932,16 @@ async def update_subscription_servers_endpoint(
 
     if removed_server_ids:
         await remove_subscription_servers(db, subscription.id, removed_server_ids)
-        await remove_user_from_servers(db, removed_server_ids)
+
+    if added_server_ids or removed_server_ids:
+        try:
+            await update_server_user_counts(
+                db,
+                add_ids=added_server_ids or None,
+                remove_ids=removed_server_ids or None,
+            )
+        except Exception as e:
+            logger.error('Ошибка обновления счётчика серверов: %s', e)
 
     ordered_selection = []
     seen_selection = set()

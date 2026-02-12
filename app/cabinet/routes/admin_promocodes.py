@@ -363,13 +363,16 @@ async def create_promocode_endpoint(
     if existing:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, 'Promo code with this code already exists')
 
+    # 0 means unlimited — convert to large number for is_valid check (current_uses < max_uses)
+    effective_max_uses = 999999 if payload.max_uses == 0 else payload.max_uses
+
     promocode = await create_promocode(
         db,
         code=normalized_code,
         type=payload.type,
         balance_bonus_kopeks=payload.balance_bonus_kopeks,
         subscription_days=payload.subscription_days,
-        max_uses=payload.max_uses,
+        max_uses=effective_max_uses,
         valid_until=normalized_valid_until,
         created_by=admin.id,
     )
@@ -426,7 +429,7 @@ async def update_promocode_endpoint(
         updates['subscription_days'] = payload.subscription_days
 
     if payload.max_uses is not None:
-        updates['max_uses'] = payload.max_uses
+        updates['max_uses'] = 999999 if payload.max_uses == 0 else payload.max_uses
 
     if payload.valid_from is not None:
         updates['valid_from'] = _normalize_datetime(payload.valid_from)
@@ -470,6 +473,61 @@ async def delete_promocode_endpoint(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, 'Failed to delete promo code')
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class DeactivateDiscountResponse(BaseModel):
+    success: bool
+    message: str
+    deactivated_code: str | None = None
+    discount_percent: int = 0
+    user_id: int
+
+
+@router.post('/deactivate-discount/{user_id}', response_model=DeactivateDiscountResponse)
+async def admin_deactivate_discount_promocode(
+    user_id: int,
+    admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_cabinet_db),
+) -> DeactivateDiscountResponse:
+    """Admin: deactivate a user's active discount promo code."""
+    from app.database.crud.user import get_user_by_id as get_user
+
+    target_user = await get_user(db, user_id)
+    if not target_user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, 'User not found')
+
+    from app.services.promocode_service import PromoCodeService
+
+    service = PromoCodeService()
+    result = await service.deactivate_discount_promocode(
+        db=db,
+        user_id=user_id,
+        admin_initiated=True,
+    )
+
+    if result['success']:
+        return DeactivateDiscountResponse(
+            success=True,
+            message=f'Discount promo code deactivated for user {user_id}',
+            deactivated_code=result.get('deactivated_code'),
+            discount_percent=result.get('discount_percent', 0),
+            user_id=user_id,
+        )
+
+    error_messages = {
+        'user_not_found': 'User not found',
+        'no_active_discount_promocode': 'User has no active discount from a promo code',
+        'discount_already_expired': 'Discount has already expired (cleaned up)',
+        'server_error': 'Server error occurred',
+    }
+
+    error_code = result.get('error', 'server_error')
+    error_message = error_messages.get(error_code, 'Failed to deactivate promo code')
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=error_message,
+    )
 
 
 # ============== PromoGroup Endpoints ==============

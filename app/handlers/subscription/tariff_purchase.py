@@ -1424,10 +1424,23 @@ async def confirm_daily_tariff_purchase(
 # ==================== Продление по тарифу ====================
 
 
+def _calc_extra_devices_cost(tariff: Tariff, subscription_device_limit: int, period_days: int) -> int:
+    """Рассчитывает стоимость дополнительных устройств сверх тарифа для периода."""
+    additional = max(0, subscription_device_limit - (tariff.device_limit or 1))
+    if additional <= 0:
+        return 0
+    device_price = getattr(tariff, 'device_price_kopeks', None) or 0
+    if device_price <= 0:
+        return 0
+    months = max(1, round(period_days / 30))
+    return additional * device_price * months
+
+
 def get_tariff_extend_keyboard(
     tariff: Tariff,
     language: str,
     db_user: User | None = None,
+    subscription_device_limit: int | None = None,
 ) -> InlineKeyboardMarkup:
     """Создает клавиатуру выбора периода для продления по тарифу с учетом скидок по периодам."""
     texts = get_texts(language)
@@ -1437,6 +1450,10 @@ def get_tariff_extend_keyboard(
     for period_str in sorted(prices.keys(), key=int):
         period = int(period_str)
         price = prices[period_str]
+
+        # Добавляем стоимость дополнительных устройств
+        if subscription_device_limit is not None:
+            price += _calc_extra_devices_cost(tariff, subscription_device_limit, period)
 
         # Получаем скидку для конкретного периода
         discount_percent = 0
@@ -1508,13 +1525,17 @@ async def show_tariff_extend(
     if has_period_discounts:
         discount_hint = '\n🎁 <i>Скидки зависят от выбранного периода</i>'
 
+    actual_device_limit = subscription.device_limit or tariff.device_limit
+
     await callback.message.edit_text(
         f'🔄 <b>Продление подписки</b>{discount_hint}\n\n'
         f'📦 Тариф: <b>{tariff.name}</b>\n'
         f'📊 Трафик: {traffic}\n'
-        f'📱 Устройств: {tariff.device_limit}\n\n'
+        f'📱 Устройств: {actual_device_limit}\n\n'
         'Выберите период продления:',
-        reply_markup=get_tariff_extend_keyboard(tariff, db_user.language, db_user=db_user),
+        reply_markup=get_tariff_extend_keyboard(
+            tariff, db_user.language, db_user=db_user, subscription_device_limit=actual_device_limit
+        ),
         parse_mode='HTML',
     )
     await callback.answer()
@@ -1538,12 +1559,16 @@ async def select_tariff_extend_period(
         await callback.answer('Тариф недоступен', show_alert=True)
         return
 
+    subscription = await get_subscription_by_user_id(db, db_user.id)
+    actual_device_limit = (subscription.device_limit if subscription else None) or tariff.device_limit
+
     # Получаем скидку для выбранного периода
     discount_percent = _get_user_period_discount(db_user, period)
 
-    # Получаем цену
+    # Получаем цену (тариф + дополнительные устройства)
     prices = tariff.period_prices or {}
     base_price = prices.get(str(period), 0)
+    base_price += _calc_extra_devices_cost(tariff, actual_device_limit, period)
     final_price = _apply_promo_discount(base_price, discount_percent)
 
     # Проверяем баланс
@@ -1560,7 +1585,7 @@ async def select_tariff_extend_period(
             f'✅ <b>Подтверждение продления</b>\n\n'
             f'📦 Тариф: <b>{tariff.name}</b>\n'
             f'📊 Трафик: {traffic}\n'
-            f'📱 Устройств: {tariff.device_limit}\n'
+            f'📱 Устройств: {actual_device_limit}\n'
             f'📅 Период: {_format_period(period)}\n'
             f'{discount_text}\n'
             f'💰 <b>К оплате: {_format_price_kopeks(final_price)}</b>\n\n'
@@ -1571,9 +1596,6 @@ async def select_tariff_extend_period(
         )
     else:
         missing = final_price - user_balance
-
-        # Получаем текущую подписку для сохранения в корзину
-        subscription = await get_subscription_by_user_id(db, db_user.id)
 
         # Сохраняем данные корзины для автопокупки после пополнения
         cart_data = {
@@ -1588,7 +1610,7 @@ async def select_tariff_extend_period(
             'return_to_cart': True,
             'description': f'Продление тарифа {tariff.name} на {period} дней',
             'traffic_limit_gb': tariff.traffic_limit_gb,
-            'device_limit': tariff.device_limit,
+            'device_limit': actual_device_limit,
             'allowed_squads': tariff.allowed_squads or [],
             'discount_percent': discount_percent,
         }
@@ -1641,12 +1663,15 @@ async def confirm_tariff_extend(
         await callback.answer('Подписка не найдена', show_alert=True)
         return
 
+    actual_device_limit = subscription.device_limit or tariff.device_limit
+
     data = await state.get_data()
     discount_percent = data.get('extend_discount_percent', 0)
 
-    # Получаем цену
+    # Получаем цену (тариф + дополнительные устройства)
     prices = tariff.period_prices or {}
     base_price = prices.get(str(period), 0)
+    base_price += _calc_extra_devices_cost(tariff, actual_device_limit, period)
     final_price = _apply_promo_discount(base_price, discount_percent)
 
     # Проверяем баланс
@@ -1724,7 +1749,7 @@ async def confirm_tariff_extend(
             f'🎉 <b>Подписка успешно продлена!</b>\n\n'
             f'📦 Тариф: <b>{tariff.name}</b>\n'
             f'📊 Трафик: {traffic}\n'
-            f'📱 Устройств: {tariff.device_limit}\n'
+            f'📱 Устройств: {actual_device_limit}\n'
             f'📅 Добавлено: {_format_period(period)}\n'
             f'💰 Списано: {_format_price_kopeks(final_price)}',
             reply_markup=InlineKeyboardMarkup(
@@ -2242,6 +2267,19 @@ async def confirm_tariff_switch(
         except Exception as e:
             logger.error(f'Ошибка обновления Remnawave при переключении тарифа: {e}')
 
+        # Гарантированный сброс устройств при смене тарифа
+        await db.refresh(db_user)
+        if db_user.remnawave_uuid:
+            try:
+                from app.services.remnawave_service import RemnaWaveService
+
+                service = RemnaWaveService()
+                async with service.get_api_client() as api:
+                    await api.reset_user_devices(db_user.remnawave_uuid)
+                    logger.info(f'🔧 Сброшены устройства при смене тарифа для user_id={db_user.id}')
+            except Exception as e:
+                logger.error(f'Ошибка сброса устройств при смене тарифа: {e}')
+
         # Создаем транзакцию
         await create_transaction(
             db,
@@ -2262,6 +2300,7 @@ async def confirm_tariff_switch(
                 days_for_new_tariff,  # Итоговый срок подписки
                 was_trial_conversion=False,
                 amount_kopeks=final_price,
+                purchase_type='tariff_switch',
             )
         except Exception as e:
             logger.error(f'Ошибка отправки уведомления админу: {e}')
@@ -2395,7 +2434,7 @@ async def confirm_daily_tariff_switch(
         await db.commit()
         await db.refresh(subscription)
 
-        # Обновляем пользователя в Remnawave
+        # Обновляем пользователя в Remnawave (create_remnawave_user также сбрасывает устройства)
         try:
             subscription_service = SubscriptionService()
             await subscription_service.create_remnawave_user(
@@ -2406,6 +2445,19 @@ async def confirm_daily_tariff_switch(
             )
         except Exception as e:
             logger.error(f'Ошибка обновления Remnawave: {e}')
+
+        # Гарантированный сброс устройств при смене тарифа
+        await db.refresh(db_user)
+        if db_user.remnawave_uuid:
+            try:
+                from app.services.remnawave_service import RemnaWaveService
+
+                service = RemnaWaveService()
+                async with service.get_api_client() as api:
+                    await api.reset_user_devices(db_user.remnawave_uuid)
+                    logger.info(f'🔧 Сброшены устройства при смене на суточный тариф для user_id={db_user.id}')
+            except Exception as e:
+                logger.error(f'Ошибка сброса устройств при смене тарифа: {e}')
 
         # Создаем транзакцию
         await create_transaction(
@@ -2427,6 +2479,7 @@ async def confirm_daily_tariff_switch(
                 1,  # 1 день
                 was_trial_conversion=False,
                 amount_kopeks=daily_price,
+                purchase_type='tariff_switch',
             )
         except Exception as e:
             logger.error(f'Ошибка отправки уведомления админу: {e}')
@@ -2972,6 +3025,19 @@ async def confirm_instant_switch(
         except Exception as e:
             logger.error(f'Ошибка обновления Remnawave при мгновенном переключении: {e}')
 
+        # Гарантированный сброс устройств при смене тарифа
+        await db.refresh(db_user)
+        if db_user.remnawave_uuid:
+            try:
+                from app.services.remnawave_service import RemnaWaveService
+
+                service = RemnaWaveService()
+                async with service.get_api_client() as api:
+                    await api.reset_user_devices(db_user.remnawave_uuid)
+                    logger.info(f'🔧 Сброшены устройства при мгновенном переключении тарифа для user_id={db_user.id}')
+            except Exception as e:
+                logger.error(f'Ошибка сброса устройств при переключении тарифа: {e}')
+
         # Создаем транзакцию если была оплата
         if is_upgrade and upgrade_cost > 0:
             await create_transaction(
@@ -2993,6 +3059,7 @@ async def confirm_instant_switch(
                     remaining_days,
                     was_trial_conversion=False,
                     amount_kopeks=upgrade_cost,
+                    purchase_type='tariff_switch',
                 )
             except Exception as e:
                 logger.error(f'Ошибка отправки уведомления админу: {e}')

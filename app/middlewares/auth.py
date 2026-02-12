@@ -5,8 +5,10 @@ from datetime import datetime
 from typing import Any
 
 from aiogram import BaseMiddleware
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, TelegramObject, User as TgUser
+from sqlalchemy.exc import InterfaceError, OperationalError
 
 from app.config import settings
 from app.database.crud.user import get_user_by_telegram_id
@@ -204,13 +206,31 @@ class AuthMiddleware(BaseMiddleware):
                 data['is_admin'] = settings.is_admin(user.id)
 
                 result = await handler(event, data)
-                await db.commit()
+                try:
+                    await db.commit()
+                except (InterfaceError, OperationalError) as conn_err:
+                    # Соединение закрылось (таймаут после долгой операции) - просто логируем
+                    logger.warning(f'⚠️ Соединение с БД закрыто после обработки, пропускаем commit: {conn_err}')
                 return result
 
+            except (InterfaceError, OperationalError) as conn_err:
+                # Соединение с БД закрылось - не пытаемся rollback
+                logger.error(f'Ошибка соединения с БД в AuthMiddleware: {conn_err}')
+                logger.error(f'Event type: {type(event)}')
+                if hasattr(event, 'data'):
+                    logger.error(f'Callback data: {event.data}')
+                raise
+            except TelegramForbiddenError:
+                # User blocked the bot — normal, not an error
+                logger.debug('AuthMiddleware: bot blocked by user, skipping')
+                return None
             except Exception as e:
                 logger.error(f'Ошибка в AuthMiddleware: {e}')
                 logger.error(f'Event type: {type(event)}')
                 if hasattr(event, 'data'):
                     logger.error(f'Callback data: {event.data}')
-                await db.rollback()
+                try:
+                    await db.rollback()
+                except (InterfaceError, OperationalError):
+                    pass  # Соединение уже закрыто
                 raise

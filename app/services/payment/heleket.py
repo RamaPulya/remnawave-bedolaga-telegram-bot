@@ -12,6 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.models import PaymentMethod, TransactionType
+from app.services.subscription_auto_purchase_service import (
+    auto_purchase_saved_cart_after_topup,
+)
 from app.utils.payment_logger import payment_logger as logger
 from app.utils.user_utils import format_referrer_info
 
@@ -257,7 +260,10 @@ class HeleketPaymentMixin:
         invoice_message = metadata.get('invoice_message') or {}
         invoice_message_removed = False
 
-        if getattr(self, 'bot', None) and invoice_message:
+        status_normalized = (status or '').lower()
+        is_final = status_normalized in {'paid', 'paid_over', 'cancel', 'fail', 'system_fail', 'refund_paid'}
+
+        if getattr(self, 'bot', None) and invoice_message and is_final:
             chat_id = invoice_message.get('chat_id')
             message_id = invoice_message.get('message_id')
             if chat_id and message_id:
@@ -297,7 +303,6 @@ class HeleketPaymentMixin:
             )
             return updated_payment
 
-        status_normalized = (status or '').lower()
         if status_normalized not in {'paid', 'paid_over'}:
             logger.info('Heleket платеж %s в статусе %s, зачисление не требуется', updated_payment.uuid, status)
             return updated_payment
@@ -320,6 +325,7 @@ class HeleketPaymentMixin:
             payment_method=PaymentMethod.HELEKET,
             external_id=updated_payment.uuid,
             is_completed=True,
+            created_at=getattr(updated_payment, 'created_at', None),
         )
 
         linked_payment = await heleket_crud.link_heleket_payment_to_transaction(
@@ -423,6 +429,38 @@ class HeleketPaymentMixin:
                     logger.error('Ошибка отправки уведомления пользователю Heleket: %s', error)
             else:
                 logger.info(f'Пропуск Telegram-уведомления Heleket для email-пользователя {user.id}')
+
+        # Автопокупка из сохранённой корзины и умная автоактивация
+        try:
+            from app.services.user_cart_service import user_cart_service
+
+            has_saved_cart = await user_cart_service.has_user_cart(user.id)
+            auto_purchase_success = False
+            if has_saved_cart:
+                try:
+                    auto_purchase_success = await auto_purchase_saved_cart_after_topup(
+                        db,
+                        user,
+                        bot=getattr(self, 'bot', None),
+                    )
+                except Exception as auto_error:
+                    logger.error(
+                        'Ошибка автоматической покупки подписки для пользователя %s: %s',
+                        user.id,
+                        auto_error,
+                        exc_info=True,
+                    )
+
+                if auto_purchase_success:
+                    has_saved_cart = False
+
+        except Exception as error:
+            logger.error(
+                'Ошибка при работе с автоактивацией для пользователя %s: %s',
+                user.id,
+                error,
+                exc_info=True,
+            )
 
         return updated_payment
 

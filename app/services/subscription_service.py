@@ -205,14 +205,21 @@ class SubscriptionService:
 
                 # Ищем существующего пользователя в панели
                 existing_users = []
-                if user.telegram_id:
-                    existing_users = await api.get_user_by_telegram_id(user.telegram_id)
-                elif user.remnawave_uuid:
-                    # Для email-пользователей ищем по uuid если есть
+                if user.remnawave_uuid:
                     try:
-                        existing_user = await api.get_user(user.remnawave_uuid)
+                        existing_user = await api.get_user_by_uuid(user.remnawave_uuid)
                         if existing_user:
                             existing_users = [existing_user]
+                    except Exception:
+                        pass
+
+                if not existing_users and user.telegram_id:
+                    existing_users = await api.get_user_by_telegram_id(user.telegram_id)
+
+                # Fallback: поиск по email (для OAuth юзеров без telegram_id)
+                if not existing_users and user.email:
+                    try:
+                        existing_users = await api.get_user_by_email(user.email)
                     except Exception:
                         pass
 
@@ -446,6 +453,11 @@ class SubscriptionService:
                 return True
 
         except Exception as e:
+            error_msg = str(e).lower()
+            # "User already disabled" - считаем успехом
+            if 'already disabled' in error_msg:
+                logger.info(f'✅ RemnaWave пользователь {user_uuid} уже отключен')
+                return True
             logger.error(f'Ошибка отключения RemnaWave пользователя: {e}')
             return False
 
@@ -458,6 +470,11 @@ class SubscriptionService:
                 return True
 
         except Exception as e:
+            error_msg = str(e).lower()
+            # "User already enabled" - считаем успехом
+            if 'already enabled' in error_msg:
+                logger.info(f'✅ RemnaWave пользователь {user_uuid} уже включен')
+                return True
             logger.error(f'Ошибка включения RemnaWave пользователя: {e}')
             return False
 
@@ -772,11 +789,6 @@ class SubscriptionService:
                         device_limit = settings.DEFAULT_DEVICE_LIMIT
                     else:
                         device_limit = forced_limit
-
-            # Модем добавляет +1 к device_limit, но оплачивается отдельно,
-            # поэтому не должен учитываться как платное устройство при продлении
-            if getattr(subscription, 'modem_enabled', False):
-                device_limit = max(1, device_limit - 1)
 
             devices_price = max(0, (device_limit or 0) - settings.DEFAULT_DEVICE_LIMIT) * settings.PRICE_PER_DEVICE
             devices_discount_percent = _resolve_discount_percent(

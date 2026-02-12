@@ -24,6 +24,7 @@ from app.handlers import (
 from app.handlers.admin import (
     backup as admin_backup,
     blacklist as admin_blacklist,
+    blocked_users as admin_blocked_users,
     bot_configuration as admin_bot_configuration,
     bulk_ban as admin_bulk_ban,
     campaigns as admin_campaigns,
@@ -60,8 +61,8 @@ from app.handlers.admin import (
 )
 from app.handlers.stars_payments import register_stars_handlers
 from app.middlewares.auth import AuthMiddleware
+from app.middlewares.blacklist import BlacklistMiddleware
 from app.middlewares.button_stats import ButtonStatsMiddleware
-from app.middlewares.display_name_restriction import DisplayNameRestrictionMiddleware
 from app.middlewares.global_error import GlobalErrorMiddleware
 from app.middlewares.logging import LoggingMiddleware
 from app.middlewares.maintenance import MaintenanceMiddleware
@@ -118,10 +119,10 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     dp.callback_query.middleware(LoggingMiddleware())
     dp.message.middleware(MaintenanceMiddleware())
     dp.callback_query.middleware(MaintenanceMiddleware())
-    display_name_middleware = DisplayNameRestrictionMiddleware()
-    dp.message.middleware(display_name_middleware)
-    dp.callback_query.middleware(display_name_middleware)
-    dp.pre_checkout_query.middleware(display_name_middleware)
+    blacklist_middleware = BlacklistMiddleware()
+    dp.message.middleware(blacklist_middleware)
+    dp.callback_query.middleware(blacklist_middleware)
+    dp.pre_checkout_query.middleware(blacklist_middleware)
     dp.message.middleware(ThrottlingMiddleware())
     dp.callback_query.middleware(ThrottlingMiddleware())
 
@@ -189,6 +190,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     admin_tariffs.register_handlers(dp)
     admin_bulk_ban.register_bulk_ban_handlers(dp)
     admin_blacklist.register_blacklist_handlers(dp)
+    admin_blocked_users.register_handlers(dp)
     common.register_handlers(dp)
     register_stars_handlers(dp)
     user_contests.register_handlers(dp)

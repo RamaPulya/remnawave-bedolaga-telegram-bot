@@ -14,7 +14,6 @@ from app.config import settings
 from app.database.database import AsyncSessionLocal
 from app.database.models import PaymentMethod, TransactionType
 from app.services.subscription_auto_purchase_service import (
-    auto_activate_subscription_after_topup,
     auto_purchase_saved_cart_after_topup,
 )
 from app.services.subscription_renewal_service import (
@@ -157,8 +156,10 @@ class CryptoBotPaymentMixin:
             cryptobot_crud = import_module('app.database.crud.cryptobot')
             payment = await cryptobot_crud.get_cryptobot_payment_by_invoice_id(db, invoice_id)
             if not payment:
-                logger.error('CryptoBot платеж не найден в БД: %s', invoice_id)
-                return False
+                logger.warning(
+                    'CryptoBot платеж не найден в БД: %s (возвращаем 200 чтобы остановить ретраи)', invoice_id
+                )
+                return True
 
             if payment.status == 'paid':
                 logger.info('CryptoBot платеж %s уже обработан', invoice_id)
@@ -252,6 +253,7 @@ class CryptoBotPaymentMixin:
                     payment_method=PaymentMethod.CRYPTOBOT,
                     external_id=invoice_id,
                     is_completed=True,
+                    created_at=getattr(updated_payment, 'created_at', None),
                 )
 
                 await cryptobot_crud.link_cryptobot_payment_to_transaction(db, invoice_id, transaction.id)
@@ -361,26 +363,7 @@ class CryptoBotPaymentMixin:
                         if auto_purchase_success:
                             has_saved_cart = False
 
-                    # Умная автоактивация если автопокупка не сработала
-                    activation_notification_sent = False
-                    if not auto_purchase_success:
-                        try:
-                            _, activation_notification_sent = await auto_activate_subscription_after_topup(
-                                db,
-                                user,
-                                bot=bot_instance,
-                                topup_amount=amount_kopeks,
-                            )
-                        except Exception as auto_activate_error:
-                            logger.error(
-                                'Ошибка умной автоактивации для пользователя %s: %s',
-                                user.id,
-                                auto_activate_error,
-                                exc_info=True,
-                            )
-
-                    # Отправляем уведомление только если его ещё не отправили
-                    if has_saved_cart and bot_instance and not activation_notification_sent:
+                    if has_saved_cart and bot_instance:
                         from app.localization.texts import get_texts
 
                         texts = get_texts(user.language)

@@ -105,6 +105,25 @@ class Settings(BaseSettings):
     REMNAWAVE_AUTO_SYNC_TIMES: str = '03:00'
     CABINET_REMNA_SUB_CONFIG: str | None = None  # UUID конфига страницы подписки из RemnaWave
 
+    # RemnaWave incoming webhooks (real-time event delivery from backend)
+    REMNAWAVE_WEBHOOK_ENABLED: bool = False
+    REMNAWAVE_WEBHOOK_PATH: str = '/remnawave-webhook'
+    REMNAWAVE_WEBHOOK_SECRET: str | None = None  # HMAC-SHA256 shared secret (min 32 chars)
+
+    # Webhook user notification toggles (what Telegram messages users receive from webhook events)
+    WEBHOOK_NOTIFY_USER_ENABLED: bool = True
+    WEBHOOK_NOTIFY_SUB_STATUS: bool = True
+    WEBHOOK_NOTIFY_SUB_EXPIRED: bool = True
+    WEBHOOK_NOTIFY_SUB_EXPIRING: bool = True
+    WEBHOOK_NOTIFY_SUB_LIMITED: bool = True
+    WEBHOOK_NOTIFY_TRAFFIC_RESET: bool = True
+    WEBHOOK_NOTIFY_SUB_DELETED: bool = True
+    WEBHOOK_NOTIFY_SUB_REVOKED: bool = True
+    WEBHOOK_NOTIFY_FIRST_CONNECTED: bool = True
+    WEBHOOK_NOTIFY_NOT_CONNECTED: bool = True
+    WEBHOOK_NOTIFY_BANDWIDTH_THRESHOLD: bool = True
+    WEBHOOK_NOTIFY_DEVICES: bool = True
+
     TRIAL_DURATION_DAYS: int = 3
     TRIAL_TRAFFIC_LIMIT_GB: int = 10
     TRIAL_DEVICE_LIMIT: int = 2
@@ -112,6 +131,7 @@ class Settings(BaseSettings):
     TRIAL_PAYMENT_ENABLED: bool = False
     TRIAL_ACTIVATION_PRICE: int = 0
     TRIAL_USER_TAG: str | None = None
+    TRIAL_DISABLED_FOR: str = 'none'  # none, email, telegram, all
     DEFAULT_TRAFFIC_LIMIT_GB: int = 100
     DEFAULT_DEVICE_LIMIT: int = 1
     DEFAULT_TRAFFIC_RESET_STRATEGY: str = 'MONTH'
@@ -160,11 +180,6 @@ class Settings(BaseSettings):
     PRICE_PER_DEVICE: int = 5000
     DEVICES_SELECTION_ENABLED: bool = True
     DEVICES_SELECTION_DISABLED_AMOUNT: int | None = None
-
-    # Настройки модема
-    MODEM_ENABLED: bool = False
-    MODEM_PRICE_PER_MONTH: int = 10000  # Цена модема в копейках за месяц
-    MODEM_PERIOD_DISCOUNTS: str = ''  # Скидки на модем: "месяцев:процент,месяцев:процент" (напр. "3:10,6:15,12:20")
 
     BASE_PROMO_GROUP_PERIOD_DISCOUNTS_ENABLED: bool = False
     BASE_PROMO_GROUP_PERIOD_DISCOUNTS: str = ''
@@ -235,6 +250,8 @@ class Settings(BaseSettings):
     BLACKLIST_GITHUB_URL: str | None = None
     BLACKLIST_UPDATE_INTERVAL_HOURS: int = 24
     BLACKLIST_IGNORE_ADMINS: bool = True
+
+    DISPOSABLE_EMAIL_CHECK_ENABLED: bool = True
 
     # Настройки простой покупки
     SIMPLE_SUBSCRIPTION_ENABLED: bool = False
@@ -336,12 +353,6 @@ class Settings(BaseSettings):
     NALOGO_STORAGE_PATH: str = './nalogo_tokens.json'
 
     AUTO_PURCHASE_AFTER_TOPUP_ENABLED: bool = False
-    AUTO_ACTIVATE_AFTER_TOPUP_ENABLED: bool = False
-
-    # Показывать предупреждение об активации подписки после пополнения баланса
-    # Если True - после пополнения показывает большое сообщение с кнопками:
-    # "Активировать", "Продлить", "Добавить устройства"
-    SHOW_ACTIVATION_PROMPT_AFTER_TOPUP: bool = False
 
     # Отключение превью ссылок в сообщениях бота
     DISABLE_WEB_PAGE_PREVIEW: bool = False
@@ -398,6 +409,7 @@ class Settings(BaseSettings):
     MULENPAY_MIN_AMOUNT_KOPEKS: int = 10000
     MULENPAY_MAX_AMOUNT_KOPEKS: int = 10000000
     MULENPAY_IFRAME_EXPECTED_ORIGIN: str | None = None
+    MULENPAY_WEBSITE_URL: str | None = None
 
     PAL24_ENABLED: bool = False
     PAL24_DISPLAY_NAME: str = 'PAL24'
@@ -406,7 +418,6 @@ class Settings(BaseSettings):
     PAL24_SIGNATURE_TOKEN: str | None = None
     PAL24_BASE_URL: str = 'https://pal24.pro/api/v1/'
     PAL24_WEBHOOK_PATH: str = '/pal24-webhook'
-    PAL24_WEBHOOK_PORT: int = 8084
     PAL24_PAYMENT_DESCRIPTION: str = 'Пополнение баланса'
     PAL24_MIN_AMOUNT_KOPEKS: int = 10000
     PAL24_MAX_AMOUNT_KOPEKS: int = 100000000
@@ -528,7 +539,7 @@ class Settings(BaseSettings):
     SKIP_REFERRAL_CODE: bool = False
 
     DEFAULT_LANGUAGE: str = 'ru'
-    AVAILABLE_LANGUAGES: str = 'ru,en'
+    AVAILABLE_LANGUAGES: str = 'ru,en,ua,zh,fa'
     LANGUAGE_SELECTION_ENABLED: bool = True
 
     # Округление цен при отображении (≤50 коп вниз, >50 коп вверх)
@@ -707,8 +718,26 @@ class Settings(BaseSettings):
     CABINET_EMAIL_VERIFICATION_ENABLED: bool = True
     CABINET_EMAIL_VERIFICATION_EXPIRE_HOURS: int = 24
     CABINET_PASSWORD_RESET_EXPIRE_HOURS: int = 1
+    CABINET_EMAIL_CHANGE_CODE_EXPIRE_MINUTES: int = 15  # Email change verification code expiration
     CABINET_EMAIL_AUTH_ENABLED: bool = True  # Enable email registration/login in cabinet
     CABINET_URL: str = 'https://example.com/cabinet'  # Base URL for cabinet (used in verification emails)
+
+    # OAuth 2.0 provider settings for cabinet
+    OAUTH_GOOGLE_CLIENT_ID: str = ''
+    OAUTH_GOOGLE_CLIENT_SECRET: str = ''
+    OAUTH_GOOGLE_ENABLED: bool = False
+
+    OAUTH_YANDEX_CLIENT_ID: str = ''
+    OAUTH_YANDEX_CLIENT_SECRET: str = ''
+    OAUTH_YANDEX_ENABLED: bool = False
+
+    OAUTH_DISCORD_CLIENT_ID: str = ''
+    OAUTH_DISCORD_CLIENT_SECRET: str = ''
+    OAUTH_DISCORD_ENABLED: bool = False
+
+    OAUTH_VK_CLIENT_ID: str = ''
+    OAUTH_VK_CLIENT_SECRET: str = ''
+    OAUTH_VK_ENABLED: bool = False
 
     # SMTP settings for cabinet email
     SMTP_HOST: str | None = None
@@ -1046,13 +1075,14 @@ class Settings(BaseSettings):
         )
 
         raw_username = template.format_map(values).strip()
-        sanitized_username = re.sub(r'[^0-9A-Za-z._-]+', '_', raw_username)
-        sanitized_username = re.sub(r'_+', '_', sanitized_username).strip('._-')
+        # Remnawave разрешает только буквы, цифры, подчёркивания и дефисы
+        sanitized_username = re.sub(r'[^0-9A-Za-z_-]+', '_', raw_username)
+        sanitized_username = re.sub(r'_+', '_', sanitized_username).strip('_-')
 
         if not sanitized_username:
             sanitized_username = f'user_{identifier}'
 
-        return sanitized_username[:64]
+        return sanitized_username[:36]
 
     @staticmethod
     def parse_daily_time_list(raw_value: str | None) -> list[time]:
@@ -1089,6 +1119,13 @@ class Settings(BaseSettings):
 
     def get_remnawave_auto_sync_times(self) -> list[time]:
         return self.parse_daily_time_list(self.REMNAWAVE_AUTO_SYNC_TIMES)
+
+    def is_remnawave_webhook_enabled(self) -> bool:
+        return (
+            self.REMNAWAVE_WEBHOOK_ENABLED
+            and bool(self.REMNAWAVE_WEBHOOK_SECRET)
+            and len(self.REMNAWAVE_WEBHOOK_SECRET or '') >= 32
+        )
 
     def get_traffic_monitored_nodes(self) -> list[str]:
         """Возвращает список UUID нод для мониторинга (пусто = все)"""
@@ -1177,22 +1214,12 @@ class Settings(BaseSettings):
 
         return bool(value)
 
-    def is_auto_activate_after_topup_enabled(self) -> bool:
-        """Умная автоактивация после пополнения баланса (без корзины)."""
-        value = getattr(self, 'AUTO_ACTIVATE_AFTER_TOPUP_ENABLED', False)
-
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            return normalized in {'1', 'true', 'yes', 'on'}
-
-        return bool(value)
-
     def is_quick_amount_buttons_enabled(self) -> bool:
         """Показывать ли кнопки быстрого выбора суммы пополнения."""
         return self.YOOKASSA_QUICK_AMOUNT_SELECTION_ENABLED and not self.DISABLE_TOPUP_BUTTONS
 
     def get_available_languages(self) -> list[str]:
-        defaults = ['ru', 'en', 'ua', 'zh']
+        defaults = ['ru', 'en', 'ua', 'zh', 'fa']
 
         try:
             langs = self.AVAILABLE_LANGUAGES
@@ -1323,6 +1350,17 @@ class Settings(BaseSettings):
 
     def get_trial_user_tag(self) -> str | None:
         return self._normalize_user_tag(self.TRIAL_USER_TAG, 'TRIAL_USER_TAG')
+
+    def is_trial_disabled_for_user(self, auth_type: str | None) -> bool:
+        disabled_for = self.TRIAL_DISABLED_FOR
+        if disabled_for == 'all':
+            return True
+        # 'email' means all non-Telegram users (email, google, yandex, discord, vk, etc.)
+        if disabled_for == 'email' and auth_type not in (None, 'telegram'):
+            return True
+        if disabled_for == 'telegram' and (auth_type is None or auth_type == 'telegram'):
+            return True
+        return False
 
     def get_paid_subscription_user_tag(self) -> str | None:
         return self._normalize_user_tag(
@@ -1516,9 +1554,6 @@ class Settings(BaseSettings):
     def get_disabled_mode_device_limit(self) -> int | None:
         return self.get_devices_selection_disabled_amount()
 
-    def is_modem_enabled(self) -> bool:
-        return bool(self.MODEM_ENABLED)
-
     def is_tariffs_mode(self) -> bool:
         """Проверяет, включен ли режим продаж 'Тарифы'."""
         return self.SALES_MODE == 'tariffs'
@@ -1534,62 +1569,6 @@ class Settings(BaseSettings):
     def get_trial_tariff_id(self) -> int:
         """Возвращает ID тарифа для триала (0 = использовать стандартные настройки)."""
         return max(0, self.TRIAL_TARIFF_ID)
-
-    def get_modem_price_per_month(self) -> int:
-        try:
-            value = int(self.MODEM_PRICE_PER_MONTH)
-        except (TypeError, ValueError):
-            logger.warning(
-                'Некорректное значение MODEM_PRICE_PER_MONTH: %s',
-                self.MODEM_PRICE_PER_MONTH,
-            )
-            return 10000
-        return max(0, value)
-
-    def get_modem_period_discounts(self) -> dict[int, int]:
-        """Возвращает скидки на модем по количеству месяцев: {месяцев: процент_скидки}"""
-        try:
-            config_str = (self.MODEM_PERIOD_DISCOUNTS or '').strip()
-            if not config_str:
-                return {}
-
-            discounts: dict[int, int] = {}
-            for part in config_str.split(','):
-                part = part.strip()
-                if not part:
-                    continue
-
-                months_and_discount = part.split(':')
-                if len(months_and_discount) != 2:
-                    continue
-
-                months_str, discount_str = months_and_discount
-                try:
-                    months = int(months_str.strip())
-                    discount_percent = int(discount_str.strip())
-                except ValueError:
-                    continue
-
-                discounts[months] = max(0, min(100, discount_percent))
-
-            return discounts
-        except Exception:
-            return {}
-
-    def get_modem_period_discount(self, months: int) -> int:
-        """Возвращает процент скидки для указанного количества месяцев"""
-        if months <= 0:
-            return 0
-
-        discounts = self.get_modem_period_discounts()
-
-        # Ищем точное совпадение или ближайшее меньшее
-        applicable_discount = 0
-        for discount_months, discount_percent in sorted(discounts.items()):
-            if months >= discount_months:
-                applicable_discount = discount_percent
-
-        return applicable_discount
 
     def is_trial_paid_activation_enabled(self) -> bool:
         # TRIAL_PAYMENT_ENABLED - главный переключатель платной активации
@@ -2432,7 +2411,7 @@ class Settings(BaseSettings):
 
     def get_bot_run_mode(self) -> str:
         mode = (self.BOT_RUN_MODE or 'polling').strip().lower()
-        if mode not in {'polling', 'webhook', 'both'}:
+        if mode not in {'polling', 'webhook'}:
             return 'polling'
         return mode
 
@@ -2514,6 +2493,9 @@ class Settings(BaseSettings):
     def get_cabinet_password_reset_expire_hours(self) -> int:
         return max(1, self.CABINET_PASSWORD_RESET_EXPIRE_HOURS)
 
+    def get_cabinet_email_change_code_expire_minutes(self) -> int:
+        return max(1, self.CABINET_EMAIL_CHANGE_CODE_EXPIRE_MINUTES)
+
     def is_cabinet_email_auth_enabled(self) -> bool:
         return bool(self.CABINET_EMAIL_AUTH_ENABLED)
 
@@ -2526,6 +2508,40 @@ class Settings(BaseSettings):
         if self.SMTP_FROM_EMAIL:
             return self.SMTP_FROM_EMAIL
         return self.SMTP_USER
+
+    # OAuth helpers
+    def get_oauth_providers_config(self) -> dict[str, dict[str, str | bool]]:
+        """Return config for all OAuth providers (enabled or not)."""
+        return {
+            'google': {
+                'client_id': self.OAUTH_GOOGLE_CLIENT_ID,
+                'client_secret': self.OAUTH_GOOGLE_CLIENT_SECRET,
+                'enabled': self.OAUTH_GOOGLE_ENABLED,
+                'display_name': 'Google',
+            },
+            'yandex': {
+                'client_id': self.OAUTH_YANDEX_CLIENT_ID,
+                'client_secret': self.OAUTH_YANDEX_CLIENT_SECRET,
+                'enabled': self.OAUTH_YANDEX_ENABLED,
+                'display_name': 'Yandex',
+            },
+            'discord': {
+                'client_id': self.OAUTH_DISCORD_CLIENT_ID,
+                'client_secret': self.OAUTH_DISCORD_CLIENT_SECRET,
+                'enabled': self.OAUTH_DISCORD_ENABLED,
+                'display_name': 'Discord',
+            },
+            'vk': {
+                'client_id': self.OAUTH_VK_CLIENT_ID,
+                'client_secret': self.OAUTH_VK_CLIENT_SECRET,
+                'enabled': self.OAUTH_VK_ENABLED,
+                'display_name': 'VK',
+            },
+        }
+
+    def get_enabled_oauth_provider_names(self) -> list[str]:
+        """Return list of enabled OAuth provider names."""
+        return [name for name, cfg in self.get_oauth_providers_config().items() if cfg['enabled']]
 
     # Ban System helpers
     def is_ban_system_enabled(self) -> bool:

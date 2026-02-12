@@ -12,7 +12,6 @@ from app.config import settings
 from app.database.models import PaymentMethod, TransactionType
 from app.services.cloudpayments_service import CloudPaymentsAPIError
 from app.services.subscription_auto_purchase_service import (
-    auto_activate_subscription_after_topup,
     auto_purchase_saved_cart_after_topup,
 )
 from app.utils.payment_logger import payment_logger as logger
@@ -223,8 +222,8 @@ class CloudPaymentsPaymentMixin:
             logger.error('Пользователь не найден: id=%s', payment.user_id)
             return False
 
-        # Add balance
-        await add_user_balance(db, user.id, amount_kopeks)
+        # Add balance (без автоматической транзакции - создадим ниже с external_id)
+        await add_user_balance(db, user, amount_kopeks, create_transaction=False)
 
         # Create transaction record
         from app.database.crud.transaction import create_transaction
@@ -232,12 +231,13 @@ class CloudPaymentsPaymentMixin:
         transaction = await create_transaction(
             db=db,
             user_id=user.id,
-            type_=TransactionType.DEPOSIT,
+            type=TransactionType.DEPOSIT,
             amount_kopeks=amount_kopeks,
             description=payment.description or settings.CLOUDPAYMENTS_DESCRIPTION,
             payment_method=PaymentMethod.CLOUDPAYMENTS,
             external_id=str(transaction_id_cp) if transaction_id_cp else invoice_id,
             is_completed=True,
+            created_at=getattr(payment, 'created_at', None),
         )
 
         payment.transaction_id = transaction.id
@@ -262,21 +262,10 @@ class CloudPaymentsPaymentMixin:
             logger.exception('Ошибка отправки уведомления CloudPayments: %s', error)
 
         # Auto-purchase if enabled
-        auto_purchase_success = False
         try:
-            auto_purchase_success = await auto_purchase_saved_cart_after_topup(db, user, bot=getattr(self, 'bot', None))
+            await auto_purchase_saved_cart_after_topup(db, user, bot=getattr(self, 'bot', None))
         except Exception as error:
             logger.exception('Ошибка автопокупки после CloudPayments: %s', error)
-
-        # Умная автоактивация если автопокупка не сработала
-        if not auto_purchase_success:
-            try:
-                # Игнорируем notification_sent т.к. здесь нет дополнительных уведомлений
-                await auto_activate_subscription_after_topup(
-                    db, user, bot=getattr(self, 'bot', None), topup_amount=amount_kopeks
-                )
-            except Exception as error:
-                logger.exception('Ошибка умной автоактивации после CloudPayments: %s', error)
 
         return True
 
@@ -350,11 +339,17 @@ class CloudPaymentsPaymentMixin:
         transaction: Any,
     ) -> None:
         """Send success notification to user via Telegram."""
-        from app.bot import bot
+        from aiogram import Bot
+        from aiogram.client.default import DefaultBotProperties
+        from aiogram.enums import ParseMode
+
+        from app.config import settings
         from app.localization.texts import get_texts
 
-        if not bot:
-            return
+        bot = Bot(
+            token=settings.BOT_TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
 
         # Skip email-only users (no telegram_id)
         if not user.telegram_id:
@@ -400,10 +395,16 @@ class CloudPaymentsPaymentMixin:
         message: str,
     ) -> None:
         """Send failure notification to user via Telegram."""
-        from app.bot import bot
+        from aiogram import Bot
+        from aiogram.client.default import DefaultBotProperties
+        from aiogram.enums import ParseMode
 
-        if not bot:
-            return
+        from app.config import settings
+
+        bot = Bot(
+            token=settings.BOT_TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
 
         text = f'❌ <b>Оплата не прошла</b>\n\n{message}'
 

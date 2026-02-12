@@ -3357,6 +3357,54 @@ async def add_media_fields_to_broadcast_history():
         return False
 
 
+async def add_email_fields_to_broadcast_history():
+    """Добавление полей для email-рассылки в broadcast_history."""
+    logger.info('=== ДОБАВЛЕНИЕ ПОЛЕЙ EMAIL В BROADCAST_HISTORY ===')
+
+    email_fields = {
+        'channel': "VARCHAR(20) DEFAULT 'telegram'",
+        'email_subject': 'VARCHAR(255)',
+        'email_html_content': 'TEXT',
+    }
+
+    try:
+        async with engine.begin() as conn:
+            db_type = await get_database_type()
+
+            # Добавление новых полей
+            for field_name, field_type in email_fields.items():
+                field_exists = await check_column_exists('broadcast_history', field_name)
+
+                if not field_exists:
+                    logger.info(f'Добавление поля {field_name} в таблицу broadcast_history')
+
+                    alter_sql = f'ALTER TABLE broadcast_history ADD COLUMN {field_name} {field_type}'
+                    await conn.execute(text(alter_sql))
+                    logger.info(f'✅ Поле {field_name} успешно добавлено')
+                else:
+                    logger.info(f'Поле {field_name} уже существует в broadcast_history')
+
+            # Сделать message_text nullable для email-only рассылок
+            try:
+                if db_type == 'postgresql':
+                    await conn.execute(text('ALTER TABLE broadcast_history ALTER COLUMN message_text DROP NOT NULL'))
+                    logger.info('✅ Колонка message_text теперь nullable')
+                elif db_type == 'mysql':
+                    await conn.execute(text('ALTER TABLE broadcast_history MODIFY COLUMN message_text TEXT NULL'))
+                    logger.info('✅ Колонка message_text теперь nullable')
+                # SQLite не поддерживает ALTER COLUMN, но там по умолчанию nullable
+            except Exception as e:
+                # Игнорируем если уже nullable или другая ошибка
+                logger.debug(f'message_text nullable: {e}')
+
+            logger.info('✅ Все поля email в broadcast_history готовы')
+            return True
+
+    except Exception as e:
+        logger.error(f'Ошибка при добавлении полей email в broadcast_history: {e}')
+        return False
+
+
 async def add_ticket_reply_block_columns():
     try:
         col_perm_exists = await check_column_exists('tickets', 'user_reply_block_permanent')
@@ -3493,6 +3541,10 @@ async def add_user_cabinet_columns() -> bool:
         ('password_reset_token', 'VARCHAR(255)', 'VARCHAR(255)', 'VARCHAR(255)'),
         ('password_reset_expires', 'DATETIME', 'TIMESTAMP', 'DATETIME'),
         ('cabinet_last_login', 'DATETIME', 'TIMESTAMP', 'DATETIME'),
+        # Email change fields
+        ('email_change_new', 'VARCHAR(255)', 'VARCHAR(255)', 'VARCHAR(255)'),
+        ('email_change_code', 'VARCHAR(6)', 'VARCHAR(6)', 'VARCHAR(6)'),
+        ('email_change_expires', 'DATETIME', 'TIMESTAMP', 'DATETIME'),
     ]
 
     try:
@@ -3558,6 +3610,33 @@ async def add_subscription_crypto_link_column() -> bool:
         return True
     except Exception as e:
         logger.error(f'Ошибка добавления колонки subscription_crypto_link: {e}')
+        return False
+
+
+async def add_subscription_last_webhook_update_column() -> bool:
+    column_exists = await check_column_exists('subscriptions', 'last_webhook_update_at')
+    if column_exists:
+        logger.info('ℹ️ Колонка last_webhook_update_at уже существует')
+        return True
+
+    try:
+        async with engine.begin() as conn:
+            db_type = await get_database_type()
+
+            if db_type == 'sqlite':
+                await conn.execute(text('ALTER TABLE subscriptions ADD COLUMN last_webhook_update_at DATETIME'))
+            elif db_type == 'postgresql':
+                await conn.execute(text('ALTER TABLE subscriptions ADD COLUMN last_webhook_update_at TIMESTAMP'))
+            elif db_type == 'mysql':
+                await conn.execute(text('ALTER TABLE subscriptions ADD COLUMN last_webhook_update_at DATETIME'))
+            else:
+                logger.error(f'Неподдерживаемый тип БД для добавления last_webhook_update_at: {db_type}')
+                return False
+
+        logger.info('✅ Добавлена колонка last_webhook_update_at в таблицу subscriptions')
+        return True
+    except Exception as e:
+        logger.error(f'Ошибка добавления колонки last_webhook_update_at: {e}')
         return False
 
 
@@ -5039,6 +5118,58 @@ async def add_transaction_receipt_columns() -> bool:
 
     except Exception as error:
         logger.error(f'❌ Ошибка добавления колонок чеков в transactions: {error}')
+        return False
+
+
+async def add_oauth_provider_columns() -> bool:
+    """Добавить колонки OAuth провайдеров (google_id, yandex_id, discord_id, vk_id) в users."""
+    try:
+        google_exists = await check_column_exists('users', 'google_id')
+        yandex_exists = await check_column_exists('users', 'yandex_id')
+        discord_exists = await check_column_exists('users', 'discord_id')
+        vk_exists = await check_column_exists('users', 'vk_id')
+
+        if google_exists and yandex_exists and discord_exists and vk_exists:
+            logger.info('Колонки OAuth провайдеров уже существуют в users')
+            return True
+
+        db_type = await get_database_type()
+
+        async with engine.begin() as conn:
+            if not google_exists:
+                await conn.execute(text('ALTER TABLE users ADD COLUMN google_id VARCHAR(255)'))
+                logger.info('✅ Добавлена колонка google_id в users')
+
+            if not yandex_exists:
+                await conn.execute(text('ALTER TABLE users ADD COLUMN yandex_id VARCHAR(255)'))
+                logger.info('✅ Добавлена колонка yandex_id в users')
+
+            if not discord_exists:
+                await conn.execute(text('ALTER TABLE users ADD COLUMN discord_id VARCHAR(255)'))
+                logger.info('✅ Добавлена колонка discord_id в users')
+
+            if not vk_exists:
+                if db_type == 'postgresql':
+                    await conn.execute(text('ALTER TABLE users ADD COLUMN vk_id BIGINT'))
+                else:
+                    await conn.execute(text('ALTER TABLE users ADD COLUMN vk_id INTEGER'))
+                logger.info('✅ Добавлена колонка vk_id в users')
+
+        # Создаём уникальные индексы
+        for col in ('google_id', 'yandex_id', 'discord_id', 'vk_id'):
+            try:
+                async with engine.begin() as conn:
+                    if db_type in ('postgresql', 'sqlite'):
+                        await conn.execute(text(f'CREATE UNIQUE INDEX IF NOT EXISTS uq_users_{col} ON users ({col})'))
+                    else:
+                        await conn.execute(text(f'CREATE UNIQUE INDEX uq_users_{col} ON users ({col})'))
+            except Exception as idx_error:
+                logger.warning(f'Индекс uq_users_{col} возможно уже существует: {idx_error}')
+
+        return True
+
+    except Exception as error:
+        logger.error(f'❌ Ошибка добавления колонок OAuth провайдеров в users: {error}')
         return False
 
 
@@ -6697,6 +6828,13 @@ async def run_universal_migration():
         else:
             logger.warning('⚠️ Проблемы с добавлением медиа полей')
 
+        logger.info('=== ДОБАВЛЕНИЕ EMAIL ПОЛЕЙ В BROADCAST_HISTORY ===')
+        email_fields_added = await add_email_fields_to_broadcast_history()
+        if email_fields_added:
+            logger.info('✅ Email поля в broadcast_history готовы')
+        else:
+            logger.warning('⚠️ Проблемы с добавлением email полей')
+
         logger.info('=== ДОБАВЛЕНИЕ ПОЛЕЙ БЛОКИРОВКИ В TICKETS ===')
         tickets_block_cols_added = await add_ticket_reply_block_columns()
         if tickets_block_cols_added:
@@ -6986,6 +7124,20 @@ async def run_universal_migration():
         else:
             logger.warning('⚠️ Проблемы с миграцией transaction_id_cp')
 
+        logger.info('=== ДОБАВЛЕНИЕ КОЛОНОК OAUTH ПРОВАЙДЕРОВ ===')
+        oauth_columns_ready = await add_oauth_provider_columns()
+        if oauth_columns_ready:
+            logger.info('✅ Колонки OAuth провайдеров (google_id, yandex_id, discord_id, vk_id) готовы')
+        else:
+            logger.warning('⚠️ Проблемы с колонками OAuth провайдеров')
+
+        logger.info('=== ДОБАВЛЕНИЕ КОЛОНКИ LAST_WEBHOOK_UPDATE_AT ===')
+        webhook_column_ready = await add_subscription_last_webhook_update_column()
+        if webhook_column_ready:
+            logger.info('✅ Колонка last_webhook_update_at готова')
+        else:
+            logger.warning('⚠️ Проблемы с колонкой last_webhook_update_at')
+
         async with engine.begin() as conn:
             total_subs = await conn.execute(text('SELECT COUNT(*) FROM subscriptions'))
             unique_users = await conn.execute(text('SELECT COUNT(DISTINCT user_id) FROM subscriptions'))
@@ -7051,6 +7203,7 @@ async def check_migration_status():
             'pinned_messages_start_mode_column': False,
             'users_last_pinned_column': False,
             'broadcast_history_media_fields': False,
+            'broadcast_history_email_fields': False,
             'subscription_duplicates': False,
             'subscription_conversions_table': False,
             'subscription_events_table': False,
@@ -7097,6 +7250,10 @@ async def check_migration_status():
             'campaign_tariff_duration_days_column': False,
             'campaign_registration_tariff_id_column': False,
             'campaign_registration_tariff_duration_days_column': False,
+            'users_google_id_column': False,
+            'users_yandex_id_column': False,
+            'users_discord_id_column': False,
+            'users_vk_id_column': False,
         }
 
         status['has_made_first_topup_column'] = await check_column_exists('users', 'has_made_first_topup')
@@ -7198,6 +7355,13 @@ async def check_migration_status():
         )
         status['broadcast_history_media_fields'] = media_fields_exist
 
+        email_fields_exist = (
+            await check_column_exists('broadcast_history', 'channel')
+            and await check_column_exists('broadcast_history', 'email_subject')
+            and await check_column_exists('broadcast_history', 'email_html_content')
+        )
+        status['broadcast_history_email_fields'] = email_fields_exist
+
         pinned_media_columns_exist = (
             status['pinned_messages_table']
             and await check_column_exists('pinned_messages', 'media_type')
@@ -7220,6 +7384,12 @@ async def check_migration_status():
         status['transactions_receipt_created_at_column'] = await check_column_exists(
             'transactions', 'receipt_created_at'
         )
+
+        # Колонки OAuth провайдеров в users
+        status['users_google_id_column'] = await check_column_exists('users', 'google_id')
+        status['users_yandex_id_column'] = await check_column_exists('users', 'yandex_id')
+        status['users_discord_id_column'] = await check_column_exists('users', 'discord_id')
+        status['users_vk_id_column'] = await check_column_exists('users', 'vk_id')
 
         async with engine.begin() as conn:
             duplicates_check = await conn.execute(
@@ -7250,6 +7420,7 @@ async def check_migration_status():
             'pinned_messages_start_mode_column': 'Режим отправки закрепа при /start',
             'users_last_pinned_column': 'Колонка last_pinned_message_id у пользователей',
             'broadcast_history_media_fields': 'Медиа поля в broadcast_history',
+            'broadcast_history_email_fields': 'Email поля в broadcast_history',
             'subscription_conversions_table': 'Таблица конверсий подписок',
             'subscription_events_table': 'Таблица событий подписок',
             'subscription_duplicates': 'Отсутствие дубликатов подписок',
@@ -7290,6 +7461,10 @@ async def check_migration_status():
             'subscription_temporary_access_table': 'Таблица subscription_temporary_access',
             'transactions_receipt_uuid_column': 'Колонка receipt_uuid в transactions',
             'transactions_receipt_created_at_column': 'Колонка receipt_created_at в transactions',
+            'users_google_id_column': 'Колонка google_id в users',
+            'users_yandex_id_column': 'Колонка yandex_id в users',
+            'users_discord_id_column': 'Колонка discord_id в users',
+            'users_vk_id_column': 'Колонка vk_id в users',
         }
 
         for check_key, check_status in status.items():

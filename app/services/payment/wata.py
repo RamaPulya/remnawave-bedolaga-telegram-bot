@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import PaymentMethod, TransactionType
 from app.services.subscription_auto_purchase_service import (
-    auto_activate_subscription_after_topup,
     auto_purchase_saved_cart_after_topup,
 )
 from app.services.wata_service import WataAPIError, WataService
@@ -99,6 +98,17 @@ class WataPaymentMixin:
             return None
 
         payment_module = import_module('app.services.payment_service')
+
+        # Добавляем идентификатор плательщика (telegram_id или email) в описание
+        try:
+            user = await payment_module.get_user_by_id(db, user_id)
+            if user:
+                if user.telegram_id:
+                    description = f'{description} | ID: {user.telegram_id}'
+                elif user.email:
+                    description = f'{description} | {user.email}'
+        except Exception as error:
+            logger.debug('Не удалось получить данные пользователя для описания WATA: %s', error)
 
         order_id = f'wata_{user_id}_{uuid.uuid4().hex[:12]}'
 
@@ -462,6 +472,7 @@ class WataPaymentMixin:
             payment_method=PaymentMethod.WATA,
             external_id=transaction_external_id or payment.payment_link_id,
             is_completed=True,
+            created_at=getattr(payment, 'created_at', None),
         )
 
         await payment_module.link_wata_payment_to_transaction(db, payment, transaction.id)
@@ -564,23 +575,7 @@ class WataPaymentMixin:
                 if auto_purchase_success:
                     has_saved_cart = False
 
-            # Умная автоактивация если автопокупка не сработала
-            activation_notification_sent = False
-            if not auto_purchase_success:
-                try:
-                    _, activation_notification_sent = await auto_activate_subscription_after_topup(
-                        db, user, bot=getattr(self, 'bot', None), topup_amount=payment.amount_kopeks
-                    )
-                except Exception as auto_activate_error:
-                    logger.error(
-                        'Ошибка умной автоактивации для пользователя %s: %s',
-                        user.id,
-                        auto_activate_error,
-                        exc_info=True,
-                    )
-
-            # Отправляем уведомление только если его ещё не отправили
-            if has_saved_cart and getattr(self, 'bot', None) and not activation_notification_sent and user.telegram_id:
+            if has_saved_cart and getattr(self, 'bot', None) and user.telegram_id:
                 from app.localization.texts import get_texts
 
                 texts = get_texts(user.language)

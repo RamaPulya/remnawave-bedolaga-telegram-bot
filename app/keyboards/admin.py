@@ -326,6 +326,12 @@ def get_admin_users_keyboard(language: str = 'ru') -> InlineKeyboardMarkup:
                     text=_t(texts, 'ADMIN_USERS_BULK_BAN', '🛑 Массовый бан'), callback_data='admin_bulk_ban_start'
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    text=_t(texts, 'ADMIN_USERS_BLOCKED_CHECK', '🔒 Заблокировавшие бота'),
+                    callback_data='admin_blocked_users',
+                )
+            ],
             [InlineKeyboardButton(text=texts.BACK, callback_data='admin_submenu_users')],
         ]
     )
@@ -344,32 +350,14 @@ def get_admin_users_filters_keyboard(language: str = 'ru') -> InlineKeyboardMark
             ],
             [
                 InlineKeyboardButton(
-                    text=_t(texts, 'ADMIN_USERS_FILTER_TRAFFIC', '📶 По трафику'),
-                    callback_data='admin_users_traffic_filter',
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=_t(texts, 'ADMIN_USERS_FILTER_ACTIVITY', '🕒 По активности'),
-                    callback_data='admin_users_activity_filter',
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=_t(texts, 'ADMIN_USERS_FILTER_SPENDING', '💳 По сумме трат'),
-                    callback_data='admin_users_spending_filter',
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=_t(texts, 'ADMIN_USERS_FILTER_PURCHASES', '🛒 По количеству покупок'),
-                    callback_data='admin_users_purchases_filter',
-                )
-            ],
-            [
-                InlineKeyboardButton(
                     text=_t(texts, 'ADMIN_USERS_FILTER_RENEW_READY', '♻️ Готовы к продлению'),
                     callback_data='admin_users_ready_to_renew_filter',
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t(texts, 'ADMIN_USERS_FILTER_POTENTIAL_CUSTOMERS', '💰 Потенциальные клиенты'),
+                    callback_data='admin_users_potential_customers_filter',
                 )
             ],
             [

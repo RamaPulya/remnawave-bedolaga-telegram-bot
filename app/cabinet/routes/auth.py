@@ -7,17 +7,23 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.crud.user import (
+    clear_email_change_pending,
     create_user,
     create_user_by_email,
     get_user_by_id,
     get_user_by_referral_code,
     get_user_by_telegram_id,
+    is_email_taken,
+    set_email_change_pending,
+    verify_and_apply_email_change,
 )
 from app.database.models import CabinetRefreshToken, User
+from app.services.disposable_email_service import disposable_email_service
 from app.services.referral_service import process_referral_registration
 from app.utils.timezone import panel_datetime_to_naive_utc
 
@@ -31,8 +37,10 @@ from ..auth import (
     verify_password,
 )
 from ..auth.email_verification import (
+    generate_email_change_code,
     generate_password_reset_token,
     generate_verification_token,
+    get_email_change_expires_at,
     get_password_reset_expires_at,
     get_verification_expires_at,
     is_token_expired,
@@ -41,6 +49,9 @@ from ..auth.jwt_handler import get_refresh_token_expires_at
 from ..dependencies import get_cabinet_db, get_current_cabinet_user
 from ..schemas.auth import (
     AuthResponse,
+    EmailChangeRequest,
+    EmailChangeResponse,
+    EmailChangeVerifyRequest,
     EmailLoginRequest,
     EmailRegisterRequest,
     EmailRegisterStandaloneRequest,
@@ -376,6 +387,13 @@ async def register_email(
     Requires valid JWT token from Telegram authentication.
     Sends verification email to the provided address.
     """
+    # Check for disposable email
+    if disposable_email_service.is_disposable(request.email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Disposable email addresses are not allowed',
+        )
+
     # Check if email already exists
     existing_user = await db.execute(select(User).where(User.email == request.email))
     if existing_user.scalar_one_or_none():
@@ -468,6 +486,13 @@ async def register_email_standalone(
                 detail='Invalid test email password',
             )
         logger.info(f'Test email registration: {request.email}')
+
+    # Check for disposable email
+    if disposable_email_service.is_disposable(request.email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Disposable email addresses are not allowed',
+        )
 
     # Проверить что email не занят
     existing = await db.execute(select(User).where(User.email == request.email))
@@ -934,3 +959,220 @@ async def check_is_admin(
     """Check if current user is an admin."""
     is_admin = settings.is_admin(telegram_id=user.telegram_id, email=user.email if user.email_verified else None)
     return {'is_admin': is_admin}
+
+
+@router.post('/email/change', response_model=EmailChangeResponse)
+async def request_email_change(
+    request: EmailChangeRequest,
+    user: User = Depends(get_current_cabinet_user),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """
+    Request email change.
+
+    For verified emails: sends a 6-digit verification code to the new email.
+    For unverified emails: replaces the email directly and sends verification to the new address.
+    """
+    if not user.email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='No email address to change',
+        )
+
+    # Check if new email is the same as current
+    if request.new_email.lower() == user.email.lower():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='New email is the same as current email',
+        )
+
+    # Check for disposable email
+    if disposable_email_service.is_disposable(request.new_email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Disposable email addresses are not allowed',
+        )
+
+    # Check if new email is already taken
+    if await is_email_taken(db, request.new_email, exclude_user_id=user.id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='This email is already registered',
+        )
+
+    # Unverified email: replace directly and send verification to new address
+    if not user.email_verified:
+        old_email = user.email
+        user.email = request.new_email.lower()
+        user.email_verified = False
+
+        verification_token = generate_verification_token()
+        verification_expires = get_verification_expires_at()
+        user.email_verification_token = verification_token
+        user.email_verification_expires = verification_expires
+
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='This email is already registered',
+            )
+
+        if settings.is_cabinet_email_verification_enabled() and email_service.is_configured():
+            cabinet_url = settings.CABINET_URL
+            verification_url = f'{cabinet_url}/verify-email'
+            lang = user.language or 'ru'
+            full_url = f'{verification_url}?token={verification_token}'
+            expire_hours = settings.get_cabinet_email_verification_expire_hours()
+
+            override = await get_rendered_override(
+                'email_verification',
+                lang,
+                context={
+                    'username': user.first_name or '',
+                    'verification_url': full_url,
+                    'expire_hours': str(expire_hours),
+                },
+                db=db,
+            )
+            custom_subject, custom_body = override if override else (None, None)
+
+            try:
+                await asyncio.to_thread(
+                    email_service.send_verification_email,
+                    to_email=request.new_email,
+                    verification_token=verification_token,
+                    verification_url=verification_url,
+                    username=user.first_name,
+                    language=lang,
+                    custom_subject=custom_subject,
+                    custom_body_html=custom_body,
+                )
+            except Exception as e:
+                logger.error(f'Failed to send verification email to {request.new_email} for user {user.id}: {e}')
+
+        logger.info(f'Unverified email replaced for user {user.id}: {old_email} -> {request.new_email}')
+
+        return EmailChangeResponse(
+            message='Email replaced, verification sent to new address',
+            new_email=request.new_email,
+            expires_in_minutes=0,
+        )
+
+    # Verified email: send code to new address for confirmation
+    # Generate verification code
+    code = generate_email_change_code()
+    expires_at = get_email_change_expires_at()
+    expire_minutes = settings.get_cabinet_email_change_code_expire_minutes()
+
+    # Save pending email change
+    await set_email_change_pending(db, user, request.new_email, code, expires_at)
+
+    # Send verification email to new address
+    if email_service.is_configured():
+        lang = user.language or 'ru'
+
+        # Check for admin template override
+        override = await get_rendered_override(
+            'email_change_code',
+            lang,
+            context={
+                'username': user.first_name or '',
+                'code': code,
+                'expire_minutes': str(expire_minutes),
+            },
+            db=db,
+        )
+        custom_subject, custom_body = override if override else (None, None)
+
+        await asyncio.to_thread(
+            email_service.send_email_change_code,
+            to_email=request.new_email,
+            code=code,
+            username=user.first_name,
+            language=lang,
+            custom_subject=custom_subject,
+            custom_body_html=custom_body,
+        )
+    else:
+        # Clear pending change if email service is not configured
+        await clear_email_change_pending(db, user)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Email service is not configured',
+        )
+
+    logger.info(f'Email change requested for user {user.id}: {user.email} -> {request.new_email}')
+
+    return EmailChangeResponse(
+        message='Verification code sent to new email',
+        new_email=request.new_email,
+        expires_in_minutes=expire_minutes,
+    )
+
+
+@router.post('/email/change/verify')
+async def verify_email_change(
+    request: EmailChangeVerifyRequest,
+    user: User = Depends(get_current_cabinet_user),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """
+    Verify email change with code.
+
+    Completes the email change process if the code is valid.
+    """
+    success, message = await verify_and_apply_email_change(db, user, request.code)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message,
+        )
+
+    return {
+        'message': message,
+        'new_email': user.email,
+    }
+
+
+@router.post('/email/change/cancel')
+async def cancel_email_change(
+    user: User = Depends(get_current_cabinet_user),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """
+    Cancel pending email change.
+    """
+    if not user.email_change_new:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='No pending email change',
+        )
+
+    await clear_email_change_pending(db, user)
+
+    return {'message': 'Email change cancelled'}
+
+
+@router.get('/email/change/status')
+async def get_email_change_status(
+    user: User = Depends(get_current_cabinet_user),
+):
+    """
+    Get pending email change status.
+    """
+    if not user.email_change_new:
+        return {
+            'pending': False,
+            'new_email': None,
+            'expires_at': None,
+        }
+
+    return {
+        'pending': True,
+        'new_email': user.email_change_new,
+        'expires_at': user.email_change_expires.isoformat() if user.email_change_expires else None,
+    }
