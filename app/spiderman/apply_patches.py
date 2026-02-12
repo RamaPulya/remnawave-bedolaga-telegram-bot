@@ -27,12 +27,16 @@ def apply_spiderman_patches() -> None:
     apply_reply_main_menu_patches = (
         importlib.import_module('app.spiderman.reply_main_menu_patch').apply_reply_main_menu_patches
     )
+    apply_version_tags_fallback_patches = (
+        importlib.import_module('app.spiderman.version_tags_fallback_patch').apply_version_tags_fallback_patches
+    )
 
     apply_menu_media_patches()
     apply_admin_menu_media_patches()
     apply_admin_panel_media_patches()
     apply_reply_main_menu_patches()
     apply_campaigns_patches()
+    apply_version_tags_fallback_patches()
 
     _PATCHED = True
     logger.info('🕷️ Патчи SpiderMan применены')
