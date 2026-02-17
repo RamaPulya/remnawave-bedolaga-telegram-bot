@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import logging
 import os
 import signal
@@ -144,6 +144,11 @@ async def main():
     # NOTE: TelegramNotifierProcessor and noisy logger suppression are
     # handled inside setup_logging() / logging_config.py.
 
+    # --- SPIDERMAN OVERRIDES: STARTUP PATCHES START ---
+    from app.spiderman.apply_patches import apply_spiderman_patches
+
+    apply_spiderman_patches()
+    # --- SPIDERMAN OVERRIDES: STARTUP PATCHES END ---
     logger = structlog.get_logger(__name__)
     timeline = StartupTimeline(logger, 'Bedolaga Remnawave Bot')
     timeline.log_banner(
