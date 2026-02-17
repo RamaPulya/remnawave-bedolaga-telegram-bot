@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import logging
 import os
 import signal
@@ -144,29 +144,7 @@ async def main():
     # NOTE: TelegramNotifierProcessor and noisy logger suppression are
     # handled inside setup_logging() / logging_config.py.
 
-<<<<<<< HEAD
-    # Установим более высокий уровень логирования для "мусорных" логов
-    # --- SPIDERMAN OVERRIDES: STARTUP PATCHES START ---
-    from app.spiderman.apply_patches import apply_spiderman_patches
-
-    apply_spiderman_patches()
-    # --- SPIDERMAN OVERRIDES: STARTUP PATCHES END ---
-    logging.getLogger('aiohttp.access').setLevel(logging.ERROR)
-    logging.getLogger('aiohttp.client').setLevel(logging.WARNING)
-    logging.getLogger('aiohttp.internal').setLevel(logging.WARNING)
-    logging.getLogger('app.external.remnawave_api').setLevel(logging.WARNING)
-    logging.getLogger('aiogram').setLevel(logging.WARNING)
-    logging.getLogger('uvicorn.access').setLevel(logging.ERROR)
-    logging.getLogger('uvicorn.error').setLevel(logging.WARNING)
-    # Скрываем спам от WebSocket подключений (connection open/closed)
-    logging.getLogger('uvicorn.protocols.websockets.websockets_impl').setLevel(logging.WARNING)
-    logging.getLogger('websockets.server').setLevel(logging.WARNING)
-    logging.getLogger('websockets').setLevel(logging.WARNING)
-
-    logger = logging.getLogger(__name__)
-=======
     logger = structlog.get_logger(__name__)
->>>>>>> upstream/main
     timeline = StartupTimeline(logger, 'Bedolaga Remnawave Bot')
     timeline.log_banner(
         [
