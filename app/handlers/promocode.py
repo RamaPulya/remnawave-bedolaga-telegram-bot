@@ -1,5 +1,4 @@
-import logging
-
+import structlog
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InaccessibleMessage
@@ -14,7 +13,7 @@ from app.states import PromoCodeStates
 from app.utils.decorators import error_handler
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @error_handler
@@ -40,7 +39,7 @@ async def activate_promocode_for_registration(db: AsyncSession, user_id: int, co
     result = await promocode_service.activate_promocode(db, user_id, code)
 
     if result['success']:
-        logger.info(f'✅ Пользователь {user_id} активировал промокод {code} при регистрации')
+        logger.info('✅ Пользователь активировал промокод при регистрации', user_id=user_id, code=code)
 
         # Отправляем уведомление админу, если бот доступен
         if bot:
@@ -60,9 +59,7 @@ async def activate_promocode_for_registration(db: AsyncSession, user_id: int, co
                     )
             except Exception as notify_error:
                 logger.error(
-                    'Ошибка отправки админ уведомления об активации промокода %s: %s',
-                    code,
-                    notify_error,
+                    'Ошибка отправки админ уведомления об активации промокода', code=code, notify_error=notify_error
                 )
 
     return result
@@ -84,14 +81,52 @@ async def process_promocode(message: types.Message, db_user: User, state: FSMCon
         )
         return
 
+    from app.utils.promo_rate_limiter import promo_limiter, validate_promo_format
+
+    # Валидация формата
+    if not validate_promo_format(code):
+        await message.answer(texts.PROMOCODE_INVALID, reply_markup=get_back_keyboard(db_user.language))
+        return
+
+    # Rate-limit на перебор
+    if promo_limiter.is_blocked(message.from_user.id):
+        cooldown = promo_limiter.get_block_cooldown(message.from_user.id)
+        await message.answer(
+            texts.t(
+                'PROMO_RATE_LIMITED',
+                '⏳ Слишком много попыток. Попробуйте через {cooldown} сек.',
+            ).format(cooldown=cooldown),
+            reply_markup=get_back_keyboard(db_user.language),
+        )
+        await state.clear()
+        return
+
+    # Лимит на стакинг (макс активаций в день)
+    if not promo_limiter.can_activate(message.from_user.id):
+        await message.answer(
+            texts.t(
+                'PROMO_DAILY_LIMIT',
+                '❌ Достигнут лимит активаций промокодов на сегодня. Попробуйте завтра.',
+            ),
+            reply_markup=get_back_keyboard(db_user.language),
+        )
+        await state.clear()
+        return
+
     result = await activate_promocode_for_registration(db, db_user.id, code, message.bot)
 
     if result['success']:
+        promo_limiter.record_activation(message.from_user.id)
         await message.answer(
             texts.PROMOCODE_SUCCESS.format(description=result['description']),
             reply_markup=get_back_keyboard(db_user.language),
         )
     else:
+        # Записываем неудачную попытку только для not_found (перебор)
+        if result['error'] == 'not_found':
+            promo_limiter.record_failed_attempt(message.from_user.id)
+            promo_limiter.cleanup()
+
         error_messages = {
             'not_found': texts.PROMOCODE_INVALID,
             'expired': texts.PROMOCODE_EXPIRED,
@@ -103,6 +138,10 @@ async def process_promocode(message: types.Message, db_user: User, state: FSMCon
             'active_discount_exists': texts.t(
                 'PROMOCODE_ACTIVE_DISCOUNT_EXISTS',
                 '❌ У вас уже есть активная скидка. Используйте её перед активацией новой.',
+            ),
+            'daily_limit': texts.t(
+                'PROMO_DAILY_LIMIT',
+                '❌ Достигнут лимит активаций промокодов на сегодня. Попробуйте завтра.',
             ),
             'server_error': texts.ERROR,
         }

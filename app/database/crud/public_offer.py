@@ -1,13 +1,13 @@
-import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import PublicOffer
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def get_public_offer(db: AsyncSession, language: str) -> PublicOffer | None:
@@ -26,7 +26,7 @@ async def upsert_public_offer(
 
     if offer:
         offer.content = content or ''
-        offer.updated_at = datetime.utcnow()
+        offer.updated_at = datetime.now(UTC)
     else:
         offer = PublicOffer(
             language=language,
@@ -38,11 +38,7 @@ async def upsert_public_offer(
     await db.commit()
     await db.refresh(offer)
 
-    logger.info(
-        '✅ Публичная оферта для языка %s обновлена (ID: %s)',
-        language,
-        offer.id,
-    )
+    logger.info('✅ Публичная оферта для языка обновлена (ID:)', language=language, offer_id=offer.id)
 
     return offer
 
@@ -56,7 +52,7 @@ async def set_public_offer_enabled(
 
     if offer:
         offer.is_enabled = bool(enabled)
-        offer.updated_at = datetime.utcnow()
+        offer.updated_at = datetime.now(UTC)
     else:
         offer = PublicOffer(
             language=language,

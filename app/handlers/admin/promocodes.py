@@ -1,6 +1,6 @@
-import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
+import structlog
 from aiogram import Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +28,7 @@ from app.utils.decorators import admin_required, error_handler
 from app.utils.formatters import format_datetime
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @admin_required
@@ -597,7 +597,11 @@ async def handle_edit_value(message: types.Message, db_user: User, state: FSMCon
 
         await state.clear()
         logger.info(
-            f'Промокод {promo.code} отредактирован администратором {db_user.telegram_id}: {edit_action} = {value}'
+            'Промокод отредактирован администратором',
+            code=promo.code,
+            telegram_id=db_user.telegram_id,
+            edit_action=edit_action,
+            value=value,
         )
 
     except ValueError:
@@ -672,7 +676,10 @@ async def handle_edit_uses(message: types.Message, db_user: User, state: FSMCont
 
         await state.clear()
         logger.info(
-            f'Промокод {promo.code} отредактирован администратором {db_user.telegram_id}: max_uses = {max_uses}'
+            'Промокод отредактирован администратором max_uses',
+            code=promo.code,
+            telegram_id=db_user.telegram_id,
+            max_uses=max_uses,
         )
 
     except ValueError:
@@ -715,7 +722,7 @@ async def process_promocode_expiry(message: types.Message, db_user: User, state:
 
         valid_until = None
         if expiry_days > 0:
-            valid_until = datetime.utcnow() + timedelta(days=expiry_days)
+            valid_until = datetime.now(UTC) + timedelta(days=expiry_days)
 
         type_map = {
             'balance': PromoCodeType.BALANCE,
@@ -770,7 +777,7 @@ async def process_promocode_expiry(message: types.Message, db_user: User, state:
         )
 
         await state.clear()
-        logger.info(f'Создан промокод {code} администратором {db_user.telegram_id}')
+        logger.info('Создан промокод администратором', code=code, telegram_id=db_user.telegram_id)
 
     except ValueError:
         await message.answer('❌ Введите корректное число дней')
@@ -796,7 +803,7 @@ async def process_discount_hours(message: types.Message, db_user: User, state: F
 
         valid_until = None
         if expiry_days > 0:
-            valid_until = datetime.utcnow() + timedelta(days=expiry_days)
+            valid_until = datetime.now(UTC) + timedelta(days=expiry_days)
 
         # Создаем DISCOUNT промокод
         # balance_bonus_kopeks = процент скидки (НЕ копейки!)
@@ -840,7 +847,11 @@ async def process_discount_hours(message: types.Message, db_user: User, state: F
 
         await state.clear()
         logger.info(
-            f'Создан DISCOUNT промокод {code} ({value}%, {discount_hours}ч) администратором {db_user.telegram_id}'
+            'Создан DISCOUNT промокод (%, ч) администратором',
+            code=code,
+            value=value,
+            discount_hours=discount_hours,
+            telegram_id=db_user.telegram_id,
         )
 
     except ValueError:
@@ -866,7 +877,7 @@ async def handle_edit_expiry(message: types.Message, db_user: User, state: FSMCo
 
         valid_until = None
         if expiry_days > 0:
-            valid_until = datetime.utcnow() + timedelta(days=expiry_days)
+            valid_until = datetime.now(UTC) + timedelta(days=expiry_days)
 
         await update_promocode(db, promo, valid_until=valid_until)
 
@@ -886,7 +897,10 @@ async def handle_edit_expiry(message: types.Message, db_user: User, state: FSMCo
 
         await state.clear()
         logger.info(
-            f'Промокод {promo.code} отредактирован администратором {db_user.telegram_id}: expiry = {expiry_days} дней'
+            'Промокод отредактирован администратором expiry дней',
+            code=promo.code,
+            telegram_id=db_user.telegram_id,
+            expiry_days=expiry_days,
         )
 
     except ValueError:

@@ -1,6 +1,6 @@
-import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy import and_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 from app.database.models import YooKassaPayment
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def create_yookassa_payment(
@@ -46,15 +46,20 @@ async def create_yookassa_payment(
     except IntegrityError as e:
         await db.rollback()
         logger.error(
-            'FK violation при создании платежа YooKassa %s: user_id=%s не существует в БД: %s',
-            yookassa_payment_id,
-            user_id,
-            e,
+            'FK violation при создании платежа YooKassa : user_id= не существует в БД',
+            yookassa_payment_id=yookassa_payment_id,
+            user_id=user_id,
+            e=e,
         )
         return None
     await db.refresh(payment)
 
-    logger.info(f'Создан платеж YooKassa: {yookassa_payment_id} на {amount_kopeks / 100}₽ для пользователя {user_id}')
+    logger.info(
+        'Создан платеж YooKassa: на ₽ для пользователя',
+        yookassa_payment_id=yookassa_payment_id,
+        amount_kopeks=amount_kopeks / 100,
+        user_id=user_id,
+    )
     return payment
 
 
@@ -83,7 +88,7 @@ async def update_yookassa_payment_status(
     captured_at: datetime | None = None,
     payment_method_type: str | None = None,
 ) -> YooKassaPayment | None:
-    update_data = {'status': status, 'is_paid': is_paid, 'is_captured': is_captured, 'updated_at': datetime.utcnow()}
+    update_data = {'status': status, 'is_paid': is_paid, 'is_captured': is_captured, 'updated_at': datetime.now(UTC)}
 
     if captured_at:
         update_data['captured_at'] = captured_at
@@ -104,7 +109,12 @@ async def update_yookassa_payment_status(
     payment = result.scalar_one_or_none()
 
     if payment:
-        logger.info(f'Обновлен статус платежа YooKassa {yookassa_payment_id}: {status}, paid={is_paid}')
+        logger.info(
+            'Обновлен статус платежа YooKassa , paid',
+            yookassa_payment_id=yookassa_payment_id,
+            status=status,
+            is_paid=is_paid,
+        )
 
     return payment
 
@@ -115,7 +125,7 @@ async def link_yookassa_payment_to_transaction(
     await db.execute(
         update(YooKassaPayment)
         .where(YooKassaPayment.yookassa_payment_id == yookassa_payment_id)
-        .values(transaction_id=transaction_id, updated_at=datetime.utcnow())
+        .values(transaction_id=transaction_id, updated_at=datetime.now(UTC))
     )
     await db.commit()
 
@@ -127,7 +137,11 @@ async def link_yookassa_payment_to_transaction(
     payment = result.scalar_one_or_none()
 
     if payment:
-        logger.info(f'Платеж YooKassa {yookassa_payment_id} связан с транзакцией {transaction_id}')
+        logger.info(
+            'Платеж YooKassa связан с транзакцией',
+            yookassa_payment_id=yookassa_payment_id,
+            transaction_id=transaction_id,
+        )
 
     return payment
 
@@ -185,7 +199,7 @@ async def delete_yookassa_payment(db: AsyncSession, yookassa_payment_id: str) ->
     if payment:
         await db.delete(payment)
         await db.commit()
-        logger.info(f'Удален платеж YooKassa: {yookassa_payment_id}')
+        logger.info('Удален платеж YooKassa', yookassa_payment_id=yookassa_payment_id)
         return True
 
     return False

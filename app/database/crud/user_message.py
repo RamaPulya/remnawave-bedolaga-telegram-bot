@@ -1,7 +1,7 @@
-import logging
 import random
-from datetime import datetime
+from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,7 +9,7 @@ from app.database.models import User, UserMessage
 from app.utils.validators import sanitize_html, validate_html_tags
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def create_user_message(
@@ -36,7 +36,7 @@ async def create_user_message(
     await db.commit()
     await db.refresh(message)
 
-    logger.info(f'✅ Создано сообщение ID {message.id} пользователем {created_by}')
+    logger.info('✅ Создано сообщение ID пользователем', message_id=message.id, created_by=created_by)
     return message
 
 
@@ -111,12 +111,12 @@ async def update_user_message(
     if sort_order is not None:
         message.sort_order = sort_order
 
-    message.updated_at = datetime.utcnow()
+    message.updated_at = datetime.now(UTC)
 
     await db.commit()
     await db.refresh(message)
 
-    logger.info(f'📝 Обновлено сообщение ID {message_id}')
+    logger.info('📝 Обновлено сообщение ID', message_id=message_id)
     return message
 
 
@@ -127,13 +127,13 @@ async def toggle_user_message_status(db: AsyncSession, message_id: int) -> UserM
         return None
 
     message.is_active = not message.is_active
-    message.updated_at = datetime.utcnow()
+    message.updated_at = datetime.now(UTC)
 
     await db.commit()
     await db.refresh(message)
 
     status_text = 'активировано' if message.is_active else 'деактивировано'
-    logger.info(f'🔄 Сообщение ID {message_id} {status_text}')
+    logger.info('🔄 Сообщение ID', message_id=message_id, status_text=status_text)
 
     return message
 
@@ -147,7 +147,7 @@ async def delete_user_message(db: AsyncSession, message_id: int) -> bool:
     await db.delete(message)
     await db.commit()
 
-    logger.info(f'🗑️ Удалено сообщение ID {message_id}')
+    logger.info('🗑️ Удалено сообщение ID', message_id=message_id)
     return True
 
 

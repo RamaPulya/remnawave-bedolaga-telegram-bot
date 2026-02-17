@@ -1,6 +1,6 @@
-import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
+import structlog
 from aiogram import Dispatcher, F, types
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,7 +15,7 @@ from app.utils.decorators import admin_required, error_handler
 from app.utils.formatters import format_datetime, format_percentage
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @admin_required
@@ -40,7 +40,7 @@ async def show_users_statistics(callback: types.CallbackQuery, db_user: User, db
     total_users = stats['total_users']
     active_rate = format_percentage(stats['active_users'] / total_users * 100 if total_users > 0 else 0)
 
-    current_time = format_datetime(datetime.utcnow())
+    current_time = format_datetime(datetime.now(UTC))
 
     text = f"""
 👥 <b>Статистика пользователей</b>
@@ -75,7 +75,7 @@ async def show_users_statistics(callback: types.CallbackQuery, db_user: User, db
         if 'message is not modified' in str(e):
             await callback.answer('📊 Данные актуальны', show_alert=False)
         else:
-            logger.error(f'Ошибка обновления статистики пользователей: {e}')
+            logger.error('Ошибка обновления статистики пользователей', error=e)
             await callback.answer('❌ Ошибка обновления данных', show_alert=True)
             return
 
@@ -89,7 +89,7 @@ async def show_subscriptions_statistics(callback: types.CallbackQuery, db_user: 
 
     total_subs = stats['total_subscriptions']
     conversion_rate = format_percentage(stats['paid_subscriptions'] / total_subs * 100 if total_subs > 0 else 0)
-    current_time = format_datetime(datetime.utcnow())
+    current_time = format_datetime(datetime.now(UTC))
 
     text = f"""
 📱 <b>Статистика подписок</b>
@@ -126,19 +126,19 @@ async def show_subscriptions_statistics(callback: types.CallbackQuery, db_user: 
         if 'message is not modified' in str(e):
             await callback.answer('📊 Данные актуальны', show_alert=False)
         else:
-            logger.error(f'Ошибка обновления статистики подписок: {e}')
+            logger.error('Ошибка обновления статистики подписок', error=e)
             await callback.answer('❌ Ошибка обновления данных', show_alert=True)
 
 
 @admin_required
 @error_handler
 async def show_revenue_statistics(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     month_stats = await get_transactions_statistics(db, month_start, now)
     all_time_stats = await get_transactions_statistics(db)
-    current_time = format_datetime(datetime.utcnow())
+    current_time = format_datetime(datetime.now(UTC))
 
     text = f"""
 💰 <b>Статистика доходов</b>
@@ -181,7 +181,7 @@ async def show_revenue_statistics(callback: types.CallbackQuery, db_user: User, 
         if 'message is not modified' in str(e):
             await callback.answer('📊 Данные актуальны', show_alert=False)
         else:
-            logger.error(f'Ошибка обновления статистики доходов: {e}')
+            logger.error('Ошибка обновления статистики доходов', error=e)
             await callback.answer('❌ Ошибка обновления данных', show_alert=True)
 
 
@@ -189,7 +189,7 @@ async def show_revenue_statistics(callback: types.CallbackQuery, db_user: User, 
 @error_handler
 async def show_referral_statistics(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
     stats = await get_referral_statistics(db)
-    current_time = format_datetime(datetime.utcnow())
+    current_time = format_datetime(datetime.now(UTC))
 
     avg_per_referrer = 0
     if stats['active_referrers'] > 0:
@@ -239,7 +239,7 @@ async def show_referral_statistics(callback: types.CallbackQuery, db_user: User,
         if 'message is not modified' in str(e):
             await callback.answer('📊 Данные актуальны', show_alert=False)
         else:
-            logger.error(f'Ошибка обновления реферальной статистики: {e}')
+            logger.error('Ошибка обновления реферальной статистики', error=e)
             await callback.answer('❌ Ошибка обновления данных', show_alert=True)
 
 
@@ -250,10 +250,10 @@ async def show_summary_statistics(callback: types.CallbackQuery, db_user: User, 
     user_stats = await user_service.get_user_statistics(db)
     sub_stats = await get_subscriptions_statistics(db)
 
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     revenue_stats = await get_transactions_statistics(db, month_start, now)
-    current_time = format_datetime(datetime.utcnow())
+    current_time = format_datetime(datetime.now(UTC))
 
     conversion_rate = 0
     if user_stats['total_users'] > 0:
@@ -302,7 +302,7 @@ async def show_summary_statistics(callback: types.CallbackQuery, db_user: User, 
         if 'message is not modified' in str(e):
             await callback.answer('📊 Данные актуальны', show_alert=False)
         else:
-            logger.error(f'Ошибка обновления общей статистики: {e}')
+            logger.error('Ошибка обновления общей статистики', error=e)
             await callback.answer('❌ Ошибка обновления данных', show_alert=True)
 
 
@@ -317,10 +317,10 @@ async def show_revenue_by_period(callback: types.CallbackQuery, db_user: User, d
     revenue_data = await get_revenue_by_period(db, days)
 
     if period == 'yesterday':
-        yesterday = datetime.utcnow().date() - timedelta(days=1)
+        yesterday = datetime.now(UTC).date() - timedelta(days=1)
         revenue_data = [r for r in revenue_data if r['date'] == yesterday]
     elif period == 'today':
-        today = datetime.utcnow().date()
+        today = datetime.now(UTC).date()
         revenue_data = [r for r in revenue_data if r['date'] == today]
 
     total_revenue = sum(r['amount_kopeks'] for r in revenue_data)

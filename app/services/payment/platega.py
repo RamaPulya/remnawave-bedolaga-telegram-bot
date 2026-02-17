@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from importlib import import_module
 from typing import Any
 
@@ -43,17 +43,17 @@ class PlategaPaymentMixin:
 
         if amount_kopeks < settings.PLATEGA_MIN_AMOUNT_KOPEKS:
             logger.warning(
-                'Сумма Platega меньше минимальной: %s < %s',
-                amount_kopeks,
-                settings.PLATEGA_MIN_AMOUNT_KOPEKS,
+                'Сумма Platega меньше минимальной: <',
+                amount_kopeks=amount_kopeks,
+                PLATEGA_MIN_AMOUNT_KOPEKS=settings.PLATEGA_MIN_AMOUNT_KOPEKS,
             )
             return None
 
         if amount_kopeks > settings.PLATEGA_MAX_AMOUNT_KOPEKS:
             logger.warning(
-                'Сумма Platega больше максимальной: %s > %s',
-                amount_kopeks,
-                settings.PLATEGA_MAX_AMOUNT_KOPEKS,
+                'Сумма Platega больше максимальной: >',
+                amount_kopeks=amount_kopeks,
+                PLATEGA_MAX_AMOUNT_KOPEKS=settings.PLATEGA_MAX_AMOUNT_KOPEKS,
             )
             return None
 
@@ -73,7 +73,7 @@ class PlategaPaymentMixin:
                 payload=payload_token,
             )
         except Exception as error:  # pragma: no cover - network errors
-            logger.exception('Ошибка Platega при создании платежа: %s', error)
+            logger.exception('Ошибка Platega при создании платежа', error=error)
             return None
 
         if not response:
@@ -112,11 +112,11 @@ class PlategaPaymentMixin:
         )
 
         logger.info(
-            'Создан Platega платеж %s для пользователя %s (метод %s, сумма %s₽)',
-            transaction_id or payment.id,
-            user_id,
-            payment_method_code,
-            amount_value,
+            'Создан Platega платеж для пользователя (метод , сумма ₽)',
+            transaction_id=transaction_id or payment.id,
+            user_id=user_id,
+            payment_method_code=payment_method_code,
+            amount_value=amount_value,
         )
 
         return {
@@ -148,12 +148,12 @@ class PlategaPaymentMixin:
             )
 
         if not payment:
-            logger.warning('Platega webhook: платеж не найден (id=%s)', transaction_id)
+            logger.warning('Platega webhook: платеж не найден (id=)', transaction_id=transaction_id)
             return False
 
         status_raw = str(payload.get('status') or '').upper()
         if not status_raw:
-            logger.warning('Platega webhook без статуса для платежа %s', payment.id)
+            logger.warning('Platega webhook без статуса для платежа', payment_id=payment.id)
             return False
 
         update_kwargs = {
@@ -166,7 +166,7 @@ class PlategaPaymentMixin:
 
         if status_raw in self._SUCCESS_STATUSES:
             if payment.is_paid:
-                logger.info('Platega платеж %s уже помечен как оплачен', payment.correlation_id)
+                logger.info('Platega платеж уже помечен как оплачен', correlation_id=payment.correlation_id)
                 await payment_module.update_platega_payment(
                     db,
                     payment=payment,
@@ -190,7 +190,7 @@ class PlategaPaymentMixin:
                 **update_kwargs,
                 is_paid=False,
             )
-            logger.info('Platega платеж %s перешёл в статус %s', payment.correlation_id, status_raw)
+            logger.info('Platega платеж перешёл в статус', correlation_id=payment.correlation_id, status_raw=status_raw)
             return True
 
         await payment_module.update_platega_payment(
@@ -219,9 +219,9 @@ class PlategaPaymentMixin:
                 remote_payload = await service.get_transaction(payment.platega_transaction_id)
             except Exception as error:  # pragma: no cover - network errors
                 logger.error(
-                    'Ошибка Platega при получении транзакции %s: %s',
-                    payment.platega_transaction_id,
-                    error,
+                    'Ошибка Platega при получении транзакции',
+                    platega_transaction_id=payment.platega_transaction_id,
+                    error=error,
                 )
 
         if remote_payload:
@@ -271,7 +271,8 @@ class PlategaPaymentMixin:
             paid_at_raw = payload.get('paidAt') or payload.get('confirmedAt')
             if paid_at_raw:
                 try:
-                    paid_at = datetime.fromisoformat(str(paid_at_raw))
+                    paid_at_parsed = datetime.fromisoformat(str(paid_at_raw))
+                    paid_at = paid_at_parsed if paid_at_parsed.tzinfo else paid_at_parsed.replace(tzinfo=UTC)
                 except ValueError:
                     paid_at = None
 
@@ -300,25 +301,21 @@ class PlategaPaymentMixin:
                 try:
                     await self.bot.delete_message(chat_id, message_id)
                 except Exception as delete_error:  # pragma: no cover - depends on bot rights
-                    logger.warning(
-                        'Не удалось удалить Platega счёт %s: %s',
-                        message_id,
-                        delete_error,
-                    )
+                    logger.warning('Не удалось удалить Platega счёт', message_id=message_id, delete_error=delete_error)
                 else:
                     metadata.pop('invoice_message', None)
 
         if payment.transaction_id:
             logger.info(
-                'Platega платеж %s уже связан с транзакцией %s',
-                payment.correlation_id,
-                payment.transaction_id,
+                'Platega платеж уже связан с транзакцией',
+                correlation_id=payment.correlation_id,
+                transaction_id=payment.transaction_id,
             )
             return payment
 
         user = await payment_module.get_user_by_id(db, payment.user_id)
         if not user:
-            logger.error('Пользователь %s не найден для Platega', payment.user_id)
+            logger.error('Пользователь не найден для Platega', user_id=payment.user_id)
             return payment
 
         # Убеждаемся, что промогруппы загружены в асинхронном контексте,
@@ -375,17 +372,14 @@ class PlategaPaymentMixin:
         should_credit_balance = created_transaction or not balance_already_credited
 
         if not should_credit_balance:
-            logger.info(
-                'Platega платеж %s уже зачислил баланс ранее',
-                payment.correlation_id,
-            )
+            logger.info('Platega платеж уже зачислил баланс ранее', correlation_id=payment.correlation_id)
             return payment
 
         old_balance = user.balance_kopeks
         was_first_topup = not user.has_made_first_topup
 
         user.balance_kopeks += payment.amount_kopeks
-        user.updated_at = datetime.utcnow()
+        user.updated_at = datetime.now(UTC)
         await db.commit()
         await db.refresh(user)
         topup_status = '🆕 Первое пополнение' if was_first_topup else '🔄 Пополнение'
@@ -400,7 +394,7 @@ class PlategaPaymentMixin:
                 getattr(self, 'bot', None),
             )
         except Exception as error:
-            logger.error('Ошибка обработки реферального пополнения Platega: %s', error)
+            logger.error('Ошибка обработки реферального пополнения Platega', error=error)
 
         if was_first_topup and not user.has_made_first_topup:
             user.has_made_first_topup = True
@@ -423,7 +417,7 @@ class PlategaPaymentMixin:
                     db=db,
                 )
             except Exception as error:
-                logger.error('Ошибка отправки админ уведомления Platega: %s', error)
+                logger.error('Ошибка отправки админ уведомления Platega', error=error)
 
         method_title = settings.get_platega_method_display_title(payment.payment_method_code)
 
@@ -443,7 +437,7 @@ class PlategaPaymentMixin:
                     reply_markup=keyboard,
                 )
             except Exception as error:
-                logger.error('Ошибка отправки уведомления пользователю Platega: %s', error)
+                logger.error('Ошибка отправки уведомления пользователю Platega', error=error)
 
         try:
             from aiogram import types
@@ -461,9 +455,9 @@ class PlategaPaymentMixin:
                     )
                 except Exception as auto_error:
                     logger.error(
-                        'Ошибка автоматической покупки подписки для пользователя %s: %s',
-                        user.id,
-                        auto_error,
+                        'Ошибка автоматической покупки подписки для пользователя',
+                        user_id=user.id,
+                        auto_error=auto_error,
                         exc_info=True,
                     )
 
@@ -516,16 +510,16 @@ class PlategaPaymentMixin:
                 )
         except Exception as error:
             logger.error(
-                'Ошибка при работе с сохраненной корзиной для пользователя %s: %s',
-                payment.user_id,
-                error,
+                'Ошибка при работе с сохраненной корзиной для пользователя',
+                user_id=payment.user_id,
+                error=error,
                 exc_info=True,
             )
 
         metadata['balance_change'] = {
             'old_balance': old_balance,
             'new_balance': user.balance_kopeks,
-            'credited_at': datetime.utcnow().isoformat(),
+            'credited_at': datetime.now(UTC).isoformat(),
         }
         metadata['balance_credited'] = True
 
@@ -536,9 +530,9 @@ class PlategaPaymentMixin:
         )
 
         logger.info(
-            '✅ Обработан Platega платеж %s для пользователя %s',
-            payment.correlation_id,
-            payment.user_id,
+            '✅ Обработан Platega платеж для пользователя',
+            correlation_id=payment.correlation_id,
+            user_id=payment.user_id,
         )
 
         return payment

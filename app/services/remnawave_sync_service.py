@@ -1,10 +1,10 @@
 import asyncio
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -17,7 +17,7 @@ from app.services.remnawave_service import (
 from app.utils.cache import cache
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -128,7 +128,7 @@ class RemnaWaveAutoSyncService:
             return {'started': False, 'reason': 'already_running'}
 
         async with self._sync_lock:
-            self._last_run_started_at = datetime.utcnow()
+            self._last_run_started_at = datetime.now(UTC)
             self._last_run_finished_at = None
             self._last_run_reason = reason
             self._last_run_error = None
@@ -142,8 +142,8 @@ class RemnaWaveAutoSyncService:
                 self._last_run_success = False
                 self._last_user_stats = None
                 self._last_server_stats = None
-                self._last_run_finished_at = datetime.utcnow()
-                logger.error('❌ Автосинхронизация RemnaWave: %s', message)
+                self._last_run_finished_at = datetime.now(UTC)
+                logger.error('❌ Автосинхронизация RemnaWave', message=message)
                 return {
                     'started': True,
                     'success': False,
@@ -157,8 +157,8 @@ class RemnaWaveAutoSyncService:
                 self._last_run_success = False
                 self._last_user_stats = None
                 self._last_server_stats = None
-                self._last_run_finished_at = datetime.utcnow()
-                logger.exception('❌ Ошибка автосинхронизации RemnaWave: %s', error)
+                self._last_run_finished_at = datetime.now(UTC)
+                logger.exception('❌ Ошибка автосинхронизации RemnaWave', error=error)
                 return {
                     'started': True,
                     'success': False,
@@ -171,7 +171,7 @@ class RemnaWaveAutoSyncService:
             self._last_run_error = None
             self._last_user_stats = user_stats
             self._last_server_stats = server_stats
-            self._last_run_finished_at = datetime.utcnow()
+            self._last_run_finished_at = datetime.now(UTC)
 
             return {
                 'started': True,
@@ -205,7 +205,7 @@ class RemnaWaveAutoSyncService:
                 next_run = self._calculate_next_run(times)
                 self._next_run = next_run
 
-                delay = (next_run - datetime.utcnow()).total_seconds()
+                delay = (next_run - datetime.now(UTC)).total_seconds()
                 if delay > 0:
                     await asyncio.sleep(delay)
 
@@ -247,7 +247,7 @@ class RemnaWaveAutoSyncService:
         try:
             await cache.delete_pattern('available_countries*')
         except Exception as error:
-            logger.warning('⚠️ Не удалось очистить кеш стран после автосинхронизации: %s', error)
+            logger.warning('⚠️ Не удалось очистить кеш стран после автосинхронизации', error=error)
 
         return {
             'created': created,
@@ -258,17 +258,17 @@ class RemnaWaveAutoSyncService:
 
     @staticmethod
     def _calculate_next_run(times: list[time]) -> datetime:
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         today = now.date()
 
         for scheduled in sorted(times):
-            candidate = datetime.combine(today, scheduled)
+            candidate = datetime.combine(today, scheduled, tzinfo=UTC)
             if candidate > now:
                 return candidate
 
         first_time = sorted(times)[0]
         next_day = today + timedelta(days=1)
-        return datetime.combine(next_day, first_time)
+        return datetime.combine(next_day, first_time, tzinfo=UTC)
 
 
 def _create_service() -> RemnaWaveAutoSyncService:

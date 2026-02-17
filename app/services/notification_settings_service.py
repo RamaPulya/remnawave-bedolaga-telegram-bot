@@ -1,13 +1,14 @@
 import json
-import logging
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from app.config import settings
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class NotificationSettingsService:
@@ -18,8 +19,6 @@ class NotificationSettingsService:
     _loaded: bool = False
 
     _DEFAULTS: dict[str, dict[str, Any]] = {
-        'trial_inactive_1h': {'enabled': True},
-        'trial_inactive_24h': {'enabled': True},
         'trial_channel_unsubscribed': {'enabled': True},
         'expired_1d': {'enabled': True},
         'expired_second_wave': {
@@ -40,7 +39,7 @@ class NotificationSettingsService:
         try:
             cls._storage_path.parent.mkdir(parents=True, exist_ok=True)
         except Exception as exc:  # pragma: no cover - filesystem guard
-            logger.error('Failed to create notification settings dir: %s', exc)
+            logger.error('Failed to create notification settings dir', exc=exc)
 
     @classmethod
     def _load(cls) -> None:
@@ -55,7 +54,7 @@ class NotificationSettingsService:
             else:
                 cls._data = {}
         except Exception as exc:
-            logger.error('Failed to load notification settings: %s', exc)
+            logger.error('Failed to load notification settings', exc=exc)
             cls._data = {}
 
         changed = cls._apply_defaults()
@@ -89,7 +88,7 @@ class NotificationSettingsService:
             )
             return True
         except Exception as exc:
-            logger.error('Failed to save notification settings: %s', exc)
+            logger.error('Failed to save notification settings', exc=exc)
             return False
 
     @classmethod
@@ -121,23 +120,6 @@ class NotificationSettingsService:
     @classmethod
     def is_enabled(cls, key: str) -> bool:
         return bool(cls._get(key).get('enabled', True))
-
-    # Trial inactivity helpers
-    @classmethod
-    def is_trial_inactive_1h_enabled(cls) -> bool:
-        return cls.is_enabled('trial_inactive_1h')
-
-    @classmethod
-    def set_trial_inactive_1h_enabled(cls, enabled: bool) -> bool:
-        return cls.set_enabled('trial_inactive_1h', enabled)
-
-    @classmethod
-    def is_trial_inactive_24h_enabled(cls) -> bool:
-        return cls.is_enabled('trial_inactive_24h')
-
-    @classmethod
-    def set_trial_inactive_24h_enabled(cls, enabled: bool) -> bool:
-        return cls.set_enabled('trial_inactive_24h', enabled)
 
     @classmethod
     def is_trial_channel_unsubscribed_enabled(cls) -> bool:

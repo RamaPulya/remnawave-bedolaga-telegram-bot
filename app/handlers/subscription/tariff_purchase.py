@@ -1,8 +1,8 @@
 """Покупка подписки по тарифам."""
 
-import logging
 from datetime import timedelta
 
+import structlog
 from aiogram import Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -22,7 +22,7 @@ from app.utils.decorators import error_handler
 from app.utils.promo_offer import get_user_active_promo_discount_percent
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def _format_traffic(gb: int) -> str:
@@ -873,7 +873,7 @@ async def handle_custom_confirm(
                 reset_reason='покупка тарифа',
             )
         except Exception as e:
-            logger.error(f'Ошибка обновления Remnawave: {e}')
+            logger.error('Ошибка обновления Remnawave', error=e)
 
         # Создаем транзакцию
         await create_transaction(
@@ -897,13 +897,13 @@ async def handle_custom_confirm(
                 amount_kopeks=total_price,
             )
         except Exception as e:
-            logger.error(f'Ошибка отправки уведомления админу: {e}')
+            logger.error('Ошибка отправки уведомления админу', error=e)
 
         # Очищаем корзину после успешной покупки
         try:
             await user_cart_service.delete_user_cart(db_user.id)
         except Exception as e:
-            logger.error(f'Ошибка очистки корзины: {e}')
+            logger.error('Ошибка очистки корзины', error=e)
 
         await state.clear()
 
@@ -928,7 +928,7 @@ async def handle_custom_confirm(
         await callback.answer('Подписка оформлена!', show_alert=True)
 
     except Exception as e:
-        logger.error(f'Ошибка при покупке тарифа с кастомными параметрами: {e}', exc_info=True)
+        logger.error('Ошибка при покупке тарифа с кастомными параметрами', error=e, exc_info=True)
         await callback.answer('Произошла ошибка при оформлении подписки', show_alert=True)
 
 
@@ -1180,7 +1180,7 @@ async def confirm_tariff_purchase(
                 reset_reason='покупка тарифа',
             )
         except Exception as e:
-            logger.error(f'Ошибка обновления Remnawave: {e}')
+            logger.error('Ошибка обновления Remnawave', error=e)
 
         # Создаем транзакцию
         await create_transaction(
@@ -1204,14 +1204,14 @@ async def confirm_tariff_purchase(
                 amount_kopeks=final_price,
             )
         except Exception as e:
-            logger.error(f'Ошибка отправки уведомления админу: {e}')
+            logger.error('Ошибка отправки уведомления админу', error=e)
 
         # Очищаем корзину после успешной покупки
         try:
             await user_cart_service.delete_user_cart(db_user.id)
-            logger.info(f'Корзина очищена после покупки тарифа для пользователя {db_user.telegram_id}')
+            logger.info('Корзина очищена после покупки тарифа для пользователя', telegram_id=db_user.telegram_id)
         except Exception as e:
-            logger.error(f'Ошибка очистки корзины: {e}')
+            logger.error('Ошибка очистки корзины', error=e)
 
         await state.clear()
 
@@ -1236,7 +1236,7 @@ async def confirm_tariff_purchase(
         await callback.answer('Подписка оформлена!', show_alert=True)
 
     except Exception as e:
-        logger.error(f'Ошибка при покупке тарифа: {e}', exc_info=True)
+        logger.error('Ошибка при покупке тарифа', error=e, exc_info=True)
         await callback.answer('Произошла ошибка при оформлении подписки', show_alert=True)
 
 
@@ -1251,7 +1251,7 @@ async def confirm_daily_tariff_purchase(
     state: FSMContext,
 ):
     """Подтверждает покупку суточного тарифа."""
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     tariff_id = int(callback.data.split(':')[1])
     tariff = await get_tariff_by_id(db, tariff_id)
@@ -1314,9 +1314,9 @@ async def confirm_daily_tariff_purchase(
             existing_subscription.status = 'active'
             existing_subscription.is_trial = False  # Сбрасываем триальный статус
             existing_subscription.is_daily_paused = False
-            existing_subscription.last_daily_charge_at = datetime.utcnow()
+            existing_subscription.last_daily_charge_at = datetime.now(UTC)
             # Для суточного тарифа ставим срок на 1 день
-            existing_subscription.end_date = datetime.utcnow() + timedelta(days=1)
+            existing_subscription.end_date = datetime.now(UTC) + timedelta(days=1)
 
             # Сбрасываем докупленный трафик при смене тарифа
             from sqlalchemy import delete as sql_delete
@@ -1344,7 +1344,7 @@ async def confirm_daily_tariff_purchase(
                 tariff_id=tariff.id,
             )
             # Устанавливаем время последнего списания
-            subscription.last_daily_charge_at = datetime.utcnow()
+            subscription.last_daily_charge_at = datetime.now(UTC)
             subscription.is_daily_paused = False
             await db.commit()
             await db.refresh(subscription)
@@ -1360,7 +1360,7 @@ async def confirm_daily_tariff_purchase(
                 reset_reason='покупка суточного тарифа',
             )
         except Exception as e:
-            logger.error(f'Ошибка обновления Remnawave: {e}')
+            logger.error('Ошибка обновления Remnawave', error=e)
 
         # Создаем транзакцию
         await create_transaction(
@@ -1384,14 +1384,16 @@ async def confirm_daily_tariff_purchase(
                 amount_kopeks=daily_price,
             )
         except Exception as e:
-            logger.error(f'Ошибка отправки уведомления админу: {e}')
+            logger.error('Ошибка отправки уведомления админу', error=e)
 
         # Очищаем корзину после успешной покупки
         try:
             await user_cart_service.delete_user_cart(db_user.id)
-            logger.info(f'Корзина очищена после покупки суточного тарифа для пользователя {db_user.telegram_id}')
+            logger.info(
+                'Корзина очищена после покупки суточного тарифа для пользователя', telegram_id=db_user.telegram_id
+            )
         except Exception as e:
-            logger.error(f'Ошибка очистки корзины: {e}')
+            logger.error('Ошибка очистки корзины', error=e)
 
         await state.clear()
 
@@ -1417,7 +1419,7 @@ async def confirm_daily_tariff_purchase(
         await callback.answer('Подписка оформлена!', show_alert=True)
 
     except Exception as e:
-        logger.error(f'Ошибка при покупке суточного тарифа: {e}', exc_info=True)
+        logger.error('Ошибка при покупке суточного тарифа', error=e, exc_info=True)
         await callback.answer('Произошла ошибка при оформлении подписки', show_alert=True)
 
 
@@ -1552,6 +1554,12 @@ async def select_tariff_extend_period(
     texts = get_texts(db_user.language)
     parts = callback.data.split(':')
     tariff_id = int(parts[1])
+
+    # Кнопка «Назад» шлёт tariff_extend:{id} без периода — показываем экран выбора периода
+    if len(parts) < 3:
+        await show_tariff_extend(callback, db_user, db)
+        return
+
     period = int(parts[2])
 
     tariff = await get_tariff_by_id(db, tariff_id)
@@ -1708,7 +1716,7 @@ async def confirm_tariff_extend(
                 reset_reason='продление тарифа',
             )
         except Exception as e:
-            logger.error(f'Ошибка обновления Remnawave: {e}')
+            logger.error('Ошибка обновления Remnawave', error=e)
 
         # Создаем транзакцию
         await create_transaction(
@@ -1732,14 +1740,14 @@ async def confirm_tariff_extend(
                 amount_kopeks=final_price,
             )
         except Exception as e:
-            logger.error(f'Ошибка отправки уведомления админу: {e}')
+            logger.error('Ошибка отправки уведомления админу', error=e)
 
         # Очищаем корзину после успешной покупки
         try:
             await user_cart_service.delete_user_cart(db_user.id)
-            logger.info(f'Корзина очищена после продления тарифа для пользователя {db_user.telegram_id}')
+            logger.info('Корзина очищена после продления тарифа для пользователя', telegram_id=db_user.telegram_id)
         except Exception as e:
-            logger.error(f'Ошибка очистки корзины: {e}')
+            logger.error('Ошибка очистки корзины', error=e)
 
         await state.clear()
 
@@ -1763,7 +1771,7 @@ async def confirm_tariff_extend(
         await callback.answer('Подписка продлена!', show_alert=True)
 
     except Exception as e:
-        logger.error(f'Ошибка при продлении тарифа: {e}', exc_info=True)
+        logger.error('Ошибка при продлении тарифа', error=e, exc_info=True)
         await callback.answer('Произошла ошибка при продлении подписки', show_alert=True)
 
 
@@ -2014,9 +2022,9 @@ async def select_tariff_switch(
         current_subscription = await get_subscription_by_user_id(db, db_user.id)
         days_warning = ''
         if current_subscription and current_subscription.end_date:
-            from datetime import datetime
+            from datetime import UTC, datetime
 
-            remaining = current_subscription.end_date - datetime.utcnow()
+            remaining = current_subscription.end_date - datetime.now(UTC)
             remaining_days = max(0, remaining.days)
             if remaining_days > 1:
                 days_warning = f'\n\n⚠️ <b>Внимание!</b> У вас осталось {remaining_days} дн. подписки.\nПри смене на суточный тариф они будут утеряны!'
@@ -2095,7 +2103,7 @@ async def select_tariff_switch_period(
     state: FSMContext,
 ):
     """Обрабатывает выбор периода для переключения тарифа."""
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     parts = callback.data.split(':')
     tariff_id = int(parts[1])
@@ -2132,7 +2140,7 @@ async def select_tariff_switch_period(
     # Получаем текущую подписку для расчёта оставшегося времени
     subscription = await get_subscription_by_user_id(db, db_user.id)
     if subscription and subscription.end_date:
-        max(0, (subscription.end_date - datetime.utcnow()).days)
+        max(0, (subscription.end_date - datetime.now(UTC)).days)
 
     # При смене тарифа устанавливается ровно оплаченный период
     time_info = f'⏰ Будет установлено: {period} дней'
@@ -2265,7 +2273,7 @@ async def confirm_tariff_switch(
                 reset_reason='переключение тарифа',
             )
         except Exception as e:
-            logger.error(f'Ошибка обновления Remnawave при переключении тарифа: {e}')
+            logger.error('Ошибка обновления Remnawave при переключении тарифа', error=e)
 
         # Гарантированный сброс устройств при смене тарифа
         await db.refresh(db_user)
@@ -2276,9 +2284,9 @@ async def confirm_tariff_switch(
                 service = RemnaWaveService()
                 async with service.get_api_client() as api:
                     await api.reset_user_devices(db_user.remnawave_uuid)
-                    logger.info(f'🔧 Сброшены устройства при смене тарифа для user_id={db_user.id}')
+                    logger.info('🔧 Сброшены устройства при смене тарифа для user_id', db_user_id=db_user.id)
             except Exception as e:
-                logger.error(f'Ошибка сброса устройств при смене тарифа: {e}')
+                logger.error('Ошибка сброса устройств при смене тарифа', error=e)
 
         # Создаем транзакцию
         await create_transaction(
@@ -2303,14 +2311,14 @@ async def confirm_tariff_switch(
                 purchase_type='tariff_switch',
             )
         except Exception as e:
-            logger.error(f'Ошибка отправки уведомления админу: {e}')
+            logger.error('Ошибка отправки уведомления админу', error=e)
 
         # Очищаем корзину после успешной покупки
         try:
             await user_cart_service.delete_user_cart(db_user.id)
-            logger.info(f'Корзина очищена после смены тарифа для пользователя {db_user.telegram_id}')
+            logger.info('Корзина очищена после смены тарифа для пользователя', telegram_id=db_user.telegram_id)
         except Exception as e:
-            logger.error(f'Ошибка очистки корзины: {e}')
+            logger.error('Ошибка очистки корзины', error=e)
 
         await state.clear()
 
@@ -2338,7 +2346,7 @@ async def confirm_tariff_switch(
         await callback.answer('Тариф изменён!', show_alert=True)
 
     except Exception as e:
-        logger.error(f'Ошибка при переключении тарифа: {e}', exc_info=True)
+        logger.error('Ошибка при переключении тарифа', error=e, exc_info=True)
         await callback.answer('Произошла ошибка при переключении тарифа', show_alert=True)
 
 
@@ -2353,7 +2361,7 @@ async def confirm_daily_tariff_switch(
     state: FSMContext,
 ):
     """Подтверждает смену на суточный тариф."""
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     tariff_id = int(callback.data.split(':')[1])
     tariff = await get_tariff_by_id(db, tariff_id)
@@ -2418,9 +2426,9 @@ async def confirm_daily_tariff_switch(
         subscription.status = 'active'
         subscription.is_trial = False  # Сбрасываем триальный статус
         subscription.is_daily_paused = False
-        subscription.last_daily_charge_at = datetime.utcnow()
+        subscription.last_daily_charge_at = datetime.now(UTC)
         # Для суточного тарифа ставим срок на 1 день
-        subscription.end_date = datetime.utcnow() + timedelta(days=1)
+        subscription.end_date = datetime.now(UTC) + timedelta(days=1)
 
         # Сбрасываем докупленный трафик при смене тарифа
         from sqlalchemy import delete as sql_delete
@@ -2444,7 +2452,7 @@ async def confirm_daily_tariff_switch(
                 reset_reason='смена на суточный тариф',
             )
         except Exception as e:
-            logger.error(f'Ошибка обновления Remnawave: {e}')
+            logger.error('Ошибка обновления Remnawave', error=e)
 
         # Гарантированный сброс устройств при смене тарифа
         await db.refresh(db_user)
@@ -2455,9 +2463,9 @@ async def confirm_daily_tariff_switch(
                 service = RemnaWaveService()
                 async with service.get_api_client() as api:
                     await api.reset_user_devices(db_user.remnawave_uuid)
-                    logger.info(f'🔧 Сброшены устройства при смене на суточный тариф для user_id={db_user.id}')
+                    logger.info('🔧 Сброшены устройства при смене на суточный тариф для user_id', db_user_id=db_user.id)
             except Exception as e:
-                logger.error(f'Ошибка сброса устройств при смене тарифа: {e}')
+                logger.error('Ошибка сброса устройств при смене тарифа', error=e)
 
         # Создаем транзакцию
         await create_transaction(
@@ -2482,7 +2490,7 @@ async def confirm_daily_tariff_switch(
                 purchase_type='tariff_switch',
             )
         except Exception as e:
-            logger.error(f'Ошибка отправки уведомления админу: {e}')
+            logger.error('Ошибка отправки уведомления админу', error=e)
 
         await state.clear()
 
@@ -2507,7 +2515,7 @@ async def confirm_daily_tariff_switch(
         await callback.answer('Тариф изменён!', show_alert=True)
 
     except Exception as e:
-        logger.error(f'Ошибка при смене на суточный тариф: {e}', exc_info=True)
+        logger.error('Ошибка при смене на суточный тариф', error=e, exc_info=True)
         await callback.answer('Произошла ошибка при смене тарифа', show_alert=True)
 
 
@@ -2678,7 +2686,7 @@ async def show_instant_switch_list(
     state: FSMContext,
 ):
     """Показывает список тарифов для мгновенного переключения."""
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     texts = get_texts(db_user.language)
     await state.clear()
@@ -2702,7 +2710,7 @@ async def show_instant_switch_list(
     # Рассчитываем оставшиеся дни
     remaining_days = 0
     if subscription.end_date:
-        remaining_days = max(0, (subscription.end_date - datetime.utcnow()).days)
+        remaining_days = max(0, (subscription.end_date - datetime.now(UTC)).days)
 
     if remaining_days == 0:
         await callback.message.edit_text(
@@ -2759,7 +2767,7 @@ async def preview_instant_switch(
     state: FSMContext,
 ):
     """Показывает превью мгновенного переключения тарифа."""
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     tariff_id = int(callback.data.split(':')[1])
     new_tariff = await get_tariff_by_id(db, tariff_id)
@@ -2786,7 +2794,7 @@ async def preview_instant_switch(
         return
 
     if not remaining_days and subscription.end_date:
-        remaining_days = max(0, (subscription.end_date - datetime.utcnow()).days)
+        remaining_days = max(0, (subscription.end_date - datetime.now(UTC)).days)
 
     # Рассчитываем стоимость переключения
     upgrade_cost, is_upgrade = _calculate_instant_switch_cost(current_tariff, new_tariff, remaining_days, db_user)
@@ -2917,7 +2925,7 @@ async def confirm_instant_switch(
     state: FSMContext,
 ):
     """Подтверждает мгновенное переключение тарифа."""
-    from datetime import datetime, timedelta
+    from datetime import UTC, datetime, timedelta
 
     tariff_id = int(callback.data.split(':')[1])
     new_tariff = await get_tariff_by_id(db, tariff_id)
@@ -3005,10 +3013,10 @@ async def confirm_instant_switch(
                         description=f'Переключение на суточный тариф {new_tariff.name} (первый день)',
                     )
 
-            subscription.end_date = datetime.utcnow() + timedelta(days=1)
+            subscription.end_date = datetime.now(UTC) + timedelta(days=1)
             subscription.is_trial = False
             subscription.is_daily_paused = False
-            subscription.last_daily_charge_at = datetime.utcnow()
+            subscription.last_daily_charge_at = datetime.now(UTC)
 
         await db.commit()
         await db.refresh(subscription)
@@ -3023,7 +3031,7 @@ async def confirm_instant_switch(
                 reset_reason='мгновенное переключение тарифа',
             )
         except Exception as e:
-            logger.error(f'Ошибка обновления Remnawave при мгновенном переключении: {e}')
+            logger.error('Ошибка обновления Remnawave при мгновенном переключении', error=e)
 
         # Гарантированный сброс устройств при смене тарифа
         await db.refresh(db_user)
@@ -3034,9 +3042,11 @@ async def confirm_instant_switch(
                 service = RemnaWaveService()
                 async with service.get_api_client() as api:
                     await api.reset_user_devices(db_user.remnawave_uuid)
-                    logger.info(f'🔧 Сброшены устройства при мгновенном переключении тарифа для user_id={db_user.id}')
+                    logger.info(
+                        '🔧 Сброшены устройства при мгновенном переключении тарифа для user_id', db_user_id=db_user.id
+                    )
             except Exception as e:
-                logger.error(f'Ошибка сброса устройств при переключении тарифа: {e}')
+                logger.error('Ошибка сброса устройств при переключении тарифа', error=e)
 
         # Создаем транзакцию если была оплата
         if is_upgrade and upgrade_cost > 0:
@@ -3062,7 +3072,7 @@ async def confirm_instant_switch(
                     purchase_type='tariff_switch',
                 )
             except Exception as e:
-                logger.error(f'Ошибка отправки уведомления админу: {e}')
+                logger.error('Ошибка отправки уведомления админу', error=e)
 
         await state.clear()
 
@@ -3111,7 +3121,7 @@ async def confirm_instant_switch(
         await callback.answer('Тариф изменён!', show_alert=True)
 
     except Exception as e:
-        logger.error(f'Ошибка при мгновенном переключении тарифа: {e}', exc_info=True)
+        logger.error('Ошибка при мгновенном переключении тарифа', error=e, exc_info=True)
         await callback.answer('Произошла ошибка при переключении тарифа', show_alert=True)
 
 

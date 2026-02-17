@@ -1,10 +1,9 @@
 import html
 import io
-import logging
 import math
 import time
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import UTC, datetime
 
 from aiogram import Dispatcher, F, types
 from aiogram.filters import BaseFilter, StateFilter
@@ -693,17 +692,12 @@ async def apply_preset(
             await bot_configuration_service.set_value(db, setting_key, value)
             applied.append(setting_key)
         except ReadOnlySettingError:
-            logging.getLogger(__name__).info(
-                'Пропускаем настройку %s из пресета %s: только для чтения',
-                setting_key,
-                preset_key,
+            logger.info(
+                'Пропускаем настройку из пресета : только для чтения', setting_key=setting_key, preset_key=preset_key
             )
         except Exception as error:
-            logging.getLogger(__name__).warning(
-                'Не удалось применить пресет %s для %s: %s',
-                preset_key,
-                setting_key,
-                error,
+            logger.warning(
+                'Не удалось применить пресет для', preset_key=preset_key, setting_key=setting_key, error=error
             )
     await db.commit()
 
@@ -748,7 +742,7 @@ async def export_settings(
     keys = sorted(set(keys))
     lines = [
         '# RemnaWave bot configuration export',
-        f'# Generated at {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")}',
+        f'# Generated at {datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")}',
     ]
 
     for setting_key in keys:
@@ -759,7 +753,7 @@ async def export_settings(
         lines.append(f'{setting_key}={raw_value}')
 
     content = '\n'.join(lines)
-    filename = f'bot-settings-{datetime.utcnow().strftime("%Y%m%d-%H%M%S")}.env'
+    filename = f'bot-settings-{datetime.now(UTC).strftime("%Y%m%d-%H%M%S")}.env'
     file = types.BufferedInputFile(content.encode('utf-8'), filename=filename)
 
     await callback.message.answer_document(

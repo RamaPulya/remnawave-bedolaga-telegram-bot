@@ -1,6 +1,6 @@
-import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 from app.database.models import PromoCode, PromoCodeType, PromoCodeUse, User
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def get_promocode_by_code(db: AsyncSession, code: str) -> PromoCode | None:
@@ -78,9 +78,9 @@ async def create_promocode(
     await db.refresh(promocode)
 
     if promo_group_id:
-        logger.info(f'✅ Создан промокод: {code} с промогруппой ID {promo_group_id}')
+        logger.info('✅ Создан промокод: с промогруппой ID', code=code, promo_group_id=promo_group_id)
     else:
-        logger.info(f'✅ Создан промокод: {code}')
+        logger.info('✅ Создан промокод', code=code)
     return promocode
 
 
@@ -97,11 +97,11 @@ async def use_promocode(db: AsyncSession, promocode_id: int, user_id: int) -> bo
 
         await db.commit()
 
-        logger.info(f'✅ Промокод {promocode.code} использован пользователем {user_id}')
+        logger.info('✅ Промокод использован пользователем', code=promocode.code, user_id=user_id)
         return True
 
     except Exception as e:
-        logger.error(f'Ошибка использования промокода: {e}')
+        logger.error('Ошибка использования промокода', error=e)
         await db.rollback()
         return False
 
@@ -114,13 +114,13 @@ async def check_user_promocode_usage(db: AsyncSession, user_id: int, promocode_i
 
 
 async def create_promocode_use(db: AsyncSession, promocode_id: int, user_id: int) -> PromoCodeUse:
-    promocode_use = PromoCodeUse(promocode_id=promocode_id, user_id=user_id, used_at=datetime.utcnow())
+    promocode_use = PromoCodeUse(promocode_id=promocode_id, user_id=user_id, used_at=datetime.now(UTC))
 
     db.add(promocode_use)
     await db.commit()
     await db.refresh(promocode_use)
 
-    logger.info(f'📝 Записано использование промокода {promocode_id} пользователем {user_id}')
+    logger.info('📝 Записано использование промокода пользователем', promocode_id=promocode_id, user_id=user_id)
     return promocode_use
 
 
@@ -129,6 +129,17 @@ async def get_promocode_use_by_user_and_code(db: AsyncSession, user_id: int, pro
         select(PromoCodeUse).where(and_(PromoCodeUse.user_id == user_id, PromoCodeUse.promocode_id == promocode_id))
     )
     return result.scalar_one_or_none()
+
+
+async def count_user_recent_activations(db: AsyncSession, user_id: int, hours: int = 24) -> int:
+    """Подсчитывает количество активаций промокодов пользователем за последние N часов."""
+    from datetime import UTC, timedelta
+
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
+    result = await db.execute(
+        select(func.count(PromoCodeUse.id)).where(and_(PromoCodeUse.user_id == user_id, PromoCodeUse.used_at >= cutoff))
+    )
+    return result.scalar() or 0
 
 
 async def get_user_promocodes(db: AsyncSession, user_id: int) -> list[PromoCodeUse]:
@@ -167,7 +178,7 @@ async def update_promocode(db: AsyncSession, promocode: PromoCode, **kwargs) -> 
         if hasattr(promocode, field):
             setattr(promocode, field, value)
 
-    promocode.updated_at = datetime.utcnow()
+    promocode.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(promocode)
 
@@ -183,11 +194,11 @@ async def delete_promocode(db: AsyncSession, promocode: PromoCode) -> bool:
         await db.delete(promocode)
         await db.commit()
 
-        logger.info(f'🗑️ Удален промокод: {promocode.code}')
+        logger.info('🗑️ Удален промокод', code=promocode.code)
         return True
 
     except Exception as e:
-        logger.error(f'Ошибка удаления промокода: {e}')
+        logger.error('Ошибка удаления промокода', error=e)
         await db.rollback()
         return False
 
@@ -228,7 +239,7 @@ async def get_promocode_statistics(db: AsyncSession, promocode_id: int) -> dict:
     )
     total_uses = total_uses_result.scalar()
 
-    today = datetime.utcnow().date()
+    today = datetime.now(UTC).date()
     today_uses_result = await db.execute(
         select(func.count(PromoCodeUse.id)).where(
             and_(PromoCodeUse.promocode_id == promocode_id, PromoCodeUse.used_at >= today)

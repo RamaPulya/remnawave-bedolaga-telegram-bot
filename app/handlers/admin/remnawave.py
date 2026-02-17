@@ -1,8 +1,8 @@
-import logging
 import math
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from aiogram import Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,7 +37,7 @@ from app.utils.decorators import admin_required, error_handler
 from app.utils.formatters import format_bytes, format_datetime
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 squad_inbound_selections = {}
 squad_create_data = {}
@@ -1041,7 +1041,7 @@ async def show_system_stats(callback: types.CallbackQuery, db_user: User, db: As
 """
 
     text += f"""
-🕒 <b>Обновлено:</b> {format_datetime(stats.get('last_updated', datetime.now()))}
+🕒 <b>Обновлено:</b> {format_datetime(stats.get('last_updated', datetime.now(UTC)))}
 """
 
     keyboard = [
@@ -1167,7 +1167,7 @@ async def show_traffic_stats(callback: types.CallbackQuery, db_user: User, db: A
         for i, (node_name, total_bytes) in enumerate(sorted_nodes[:5], 1):
             text += f'{i}. {node_name}: {format_bytes(total_bytes)}\n'
 
-    text += f'\n🕒 <b>Обновлено:</b> {format_datetime(datetime.now())}'
+    text += f'\n🕒 <b>Обновлено:</b> {format_datetime(datetime.now(UTC))}'
 
     keyboard = [
         [types.InlineKeyboardButton(text='🔄 Обновить', callback_data='admin_rw_traffic')],
@@ -1317,7 +1317,7 @@ async def show_node_statistics(callback: types.CallbackQuery, db_user: User, db:
     try:
         from datetime import datetime, timedelta
 
-        end_date = datetime.now()
+        end_date = datetime.now(UTC)
         start_date = end_date - timedelta(days=7)
 
         node_usage = await remnawave_service.get_node_user_usage_by_range(node_uuid, start_date, end_date)
@@ -1403,7 +1403,7 @@ async def show_node_statistics(callback: types.CallbackQuery, db_user: User, db:
         await callback.answer()
 
     except Exception as e:
-        logger.error(f'Ошибка получения статистики ноды {node_uuid}: {e}')
+        logger.error('Ошибка получения статистики ноды', node_uuid=node_uuid, error=e)
 
         text = f"""
 📊 <b>Статистика ноды: {node['name']}</b>
@@ -1842,7 +1842,7 @@ async def save_squad_inbounds(callback: types.CallbackQuery, db_user: User, db: 
             await callback.answer('❌ Ошибка сохранения изменений', show_alert=True)
 
     except Exception as e:
-        logger.error(f'Error saving squad inbounds: {e}')
+        logger.error('Error saving squad inbounds', error=e)
         await callback.answer('❌ Ошибка при сохранении', show_alert=True)
 
 

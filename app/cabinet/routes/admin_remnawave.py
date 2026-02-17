@@ -1,9 +1,9 @@
 """Admin routes for RemnaWave management in cabinet."""
 
-import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,7 +76,7 @@ except Exception:
     remnawave_sync_service = None
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix='/admin/remnawave', tags=['Cabinet Admin RemnaWave'])
 
@@ -109,7 +109,10 @@ def _parse_datetime(value: Any) -> datetime | None:
         return value
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value)
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=UTC)
+            return parsed
         except ValueError:
             return None
     return None
@@ -338,7 +341,7 @@ async def get_node_usage(
     service = _get_service()
     _ensure_configured(service)
 
-    end_dt = end or datetime.utcnow()
+    end_dt = end or datetime.now(UTC)
     start_dt = start or (end_dt - timedelta(days=7))
 
     if start_dt >= end_dt:
@@ -380,7 +383,9 @@ async def perform_node_action(
     }
 
     if success:
-        logger.info(f'Admin {admin.telegram_id} performed {payload.action} on node {node_uuid}')
+        logger.info(
+            'Admin performed on node', telegram_id=admin.telegram_id, action=payload.action, node_uuid=node_uuid
+        )
         return NodeActionResponse(
             success=True,
             message=messages.get(payload.action, 'Action completed'),
@@ -403,7 +408,7 @@ async def restart_all_nodes(
     success = await service.restart_all_nodes()
 
     if success:
-        logger.info(f'Admin {admin.telegram_id} restarted all nodes')
+        logger.info('Admin restarted all nodes', telegram_id=admin.telegram_id)
         return NodeActionResponse(success=True, message='All nodes restart initiated')
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
@@ -510,7 +515,9 @@ async def create_squad(
     squad_uuid = await service.create_squad(payload.name, payload.inbound_uuids)
 
     if squad_uuid:
-        logger.info(f'Admin {admin.telegram_id} created squad {payload.name} ({squad_uuid})')
+        logger.info(
+            'Admin created squad', telegram_id=admin.telegram_id, payload_name=payload.name, squad_uuid=squad_uuid
+        )
         return SquadOperationResponse(
             success=True,
             message='Squad created successfully',
@@ -545,7 +552,7 @@ async def update_squad(
     )
 
     if success:
-        logger.info(f'Admin {admin.telegram_id} updated squad {squad_uuid}')
+        logger.info('Admin updated squad', telegram_id=admin.telegram_id, squad_uuid=squad_uuid)
         return SquadOperationResponse(success=True, message='Squad updated')
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
@@ -594,7 +601,7 @@ async def perform_squad_action(
         message = 'Inbounds updated' if success else 'Failed to update inbounds'
 
     if success:
-        logger.info(f'Admin {admin.telegram_id} performed {action} on squad {squad_uuid}')
+        logger.info('Admin performed on squad', telegram_id=admin.telegram_id, action=action, squad_uuid=squad_uuid)
 
     return SquadOperationResponse(success=success, message=message)
 
@@ -611,7 +618,7 @@ async def delete_squad(
     success = await service.delete_squad(squad_uuid)
 
     if success:
-        logger.info(f'Admin {admin.telegram_id} deleted squad {squad_uuid}')
+        logger.info('Admin deleted squad', telegram_id=admin.telegram_id, squad_uuid=squad_uuid)
         return SquadOperationResponse(success=True, message='Squad deleted')
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
@@ -699,7 +706,9 @@ async def migrate_squad_users(
             error=result.get('error'),
         )
 
-    logger.info(f'Admin {admin.telegram_id} migrated users from {source_uuid} to {target_uuid}')
+    logger.info(
+        'Admin migrated users from to', telegram_id=admin.telegram_id, source_uuid=source_uuid, target_uuid=target_uuid
+    )
 
     return MigrationResponse(
         success=True,
@@ -782,14 +791,14 @@ async def toggle_auto_sync(
     if payload.enabled and not current_status.enabled:
         # Enable - would need to update settings and refresh schedule
         remnawave_sync_service.schedule_refresh(run_immediately=True)
-        logger.info(f'Admin {admin.telegram_id} enabled auto sync')
+        logger.info('Admin enabled auto sync', telegram_id=admin.telegram_id)
         return SyncResponse(
             success=True,
             message='Auto sync enabled and scheduled',
         )
     if not payload.enabled and current_status.enabled:
         # Disable - would need to update settings and stop scheduler
-        logger.info(f'Admin {admin.telegram_id} disabled auto sync')
+        logger.info('Admin disabled auto sync', telegram_id=admin.telegram_id)
         return SyncResponse(
             success=True,
             message='Auto sync setting change requested. Restart may be required.',
@@ -811,7 +820,7 @@ async def run_auto_sync_now(
             detail='Auto sync service is not available',
         )
 
-    logger.info(f'Admin {admin.telegram_id} triggered manual sync')
+    logger.info('Admin triggered manual sync', telegram_id=admin.telegram_id)
     result = await remnawave_sync_service.run_sync_now(reason='manual')
 
     return AutoSyncRunResponse(
@@ -839,7 +848,7 @@ async def sync_from_panel(
 
     try:
         stats = await service.sync_users_from_panel(db, payload.mode)
-        logger.info(f'Admin {admin.telegram_id} synced from panel (mode: {payload.mode})')
+        logger.info('Admin synced from panel (mode: )', telegram_id=admin.telegram_id, mode=payload.mode)
         return SyncResponse(
             success=True,
             message='Sync from panel completed',
@@ -862,7 +871,7 @@ async def sync_to_panel(
     _ensure_configured(service)
 
     stats = await service.sync_users_to_panel(db)
-    logger.info(f'Admin {admin.telegram_id} synced to panel')
+    logger.info('Admin synced to panel', telegram_id=admin.telegram_id)
 
     return SyncResponse(
         success=True,
@@ -892,9 +901,15 @@ async def sync_servers(
     try:
         await cache.delete_pattern('available_countries*')
     except Exception as e:
-        logger.warning(f'Failed to clear countries cache: {e}')
+        logger.warning('Failed to clear countries cache', error=e)
 
-    logger.info(f'Admin {admin.telegram_id} synced servers: created={created}, updated={updated}, removed={removed}')
+    logger.info(
+        'Admin synced servers: created=, updated=, removed',
+        telegram_id=admin.telegram_id,
+        created=created,
+        updated=updated,
+        removed=removed,
+    )
 
     return SyncResponse(
         success=True,
@@ -918,7 +933,7 @@ async def validate_subscriptions(
     _ensure_configured(service)
 
     stats = await service.validate_and_fix_subscriptions(db)
-    logger.info(f'Admin {admin.telegram_id} validated subscriptions')
+    logger.info('Admin validated subscriptions', telegram_id=admin.telegram_id)
 
     return SyncResponse(
         success=True,
@@ -937,7 +952,7 @@ async def cleanup_subscriptions(
     _ensure_configured(service)
 
     stats = await service.cleanup_orphaned_subscriptions(db)
-    logger.info(f'Admin {admin.telegram_id} cleaned up subscriptions')
+    logger.info('Admin cleaned up subscriptions', telegram_id=admin.telegram_id)
 
     return SyncResponse(
         success=True,
@@ -956,7 +971,7 @@ async def sync_subscription_statuses(
     _ensure_configured(service)
 
     stats = await service.sync_subscription_statuses(db)
-    logger.info(f'Admin {admin.telegram_id} synced subscription statuses')
+    logger.info('Admin synced subscription statuses', telegram_id=admin.telegram_id)
 
     return SyncResponse(
         success=True,

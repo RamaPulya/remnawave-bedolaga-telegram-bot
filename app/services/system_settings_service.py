@@ -1,9 +1,9 @@
 import hashlib
 import json
-import logging
 from dataclasses import dataclass
 from typing import Any, Optional, Union, get_args, get_origin
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,7 +23,7 @@ from app.database.models import SystemSetting
 from app.database.universal_migration import ensure_default_web_api_token
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def _title_from_key(key: str) -> str:
@@ -294,6 +294,7 @@ class BotConfigurationService:
         'LOGO_FILE': 'INTERFACE_BRANDING',
         'HIDE_SUBSCRIPTION_LINK': 'INTERFACE_SUBSCRIPTION',
         'MAIN_MENU_MODE': 'INTERFACE',
+        'CABINET_BUTTON_STYLE': 'INTERFACE',
         'CONNECT_BUTTON_MODE': 'CONNECT_BUTTON',
         'MINIAPP_CUSTOM_URL': 'CONNECT_BUTTON',
         'APP_CONFIG_PATH': 'ADDITIONAL',
@@ -406,7 +407,13 @@ class BotConfigurationService:
         ],
         'MAIN_MENU_MODE': [
             ChoiceOption('default', '📋 Полное меню'),
-            ChoiceOption('text', '📝 Текстовое меню'),
+            ChoiceOption('cabinet', '🏠 Cabinet (МиниАпп)'),
+        ],
+        'CABINET_BUTTON_STYLE': [
+            ChoiceOption('', '🎨 По секциям (авто)'),
+            ChoiceOption('primary', '🔵 Синий'),
+            ChoiceOption('success', '🟢 Зелёный'),
+            ChoiceOption('danger', '🔴 Красный'),
         ],
         'SALES_MODE': [
             ChoiceOption('classic', '📋 Классический (периоды из .env)'),
@@ -1219,7 +1226,7 @@ class BotConfigurationService:
                 if isinstance(price_value, int):
                     label = f'{label} — {settings.format_price(price_value)}'
             except Exception:
-                logger.debug('Не удалось форматировать цену для периода %s', days, exc_info=True)
+                logger.debug('Не удалось форматировать цену для периода', days=days, exc_info=True)
 
             options.append(ChoiceOption(days, label))
 
@@ -1262,7 +1269,7 @@ class BotConfigurationService:
         try:
             packages = settings.get_traffic_packages()
         except Exception as error:
-            logger.warning('Не удалось получить пакеты трафика: %s', error, exc_info=True)
+            logger.warning('Не удалось получить пакеты трафика', error=error, exc_info=True)
             packages = []
 
         traffic_values: set[int] = {0}
@@ -1422,15 +1429,12 @@ class BotConfigurationService:
 
         for key, raw_value in overrides.items():
             if cls._is_env_override(key):
-                logger.debug(
-                    'Пропускаем настройку %s из БД: используется значение из окружения',
-                    key,
-                )
+                logger.debug('Пропускаем настройку из БД: используется значение из окружения', key=key)
                 continue
             try:
                 parsed_value = cls.deserialize_value(key, raw_value)
             except Exception as error:
-                logger.error('Не удалось применить настройку %s: %s', key, error)
+                logger.error('Не удалось применить настройку', key=key, error=error)
                 continue
 
             cls._overrides_raw[key] = raw_value
@@ -1541,10 +1545,7 @@ class BotConfigurationService:
         raw_value = cls.serialize_value(key, value)
         await upsert_system_setting(db, key, raw_value)
         if cls._is_env_override(key):
-            logger.info(
-                'Настройка %s сохранена в БД, но не применена: значение задаётся через окружение',
-                key,
-            )
+            logger.info('Настройка сохранена в БД, но не применена: значение задаётся через окружение', key=key)
             cls._overrides_raw.pop(key, None)
         else:
             cls._overrides_raw[key] = raw_value
@@ -1567,10 +1568,7 @@ class BotConfigurationService:
         await delete_system_setting(db, key)
         cls._overrides_raw.pop(key, None)
         if cls._is_env_override(key):
-            logger.info(
-                'Настройка %s сброшена в БД, используется значение из окружения',
-                key,
-            )
+            logger.info('Настройка сброшена в БД, используется значение из окружения', key=key)
         else:
             original = cls.get_original_value(key)
             cls._apply_to_settings(key, original)
@@ -1581,10 +1579,7 @@ class BotConfigurationService:
     @classmethod
     def _apply_to_settings(cls, key: str, value: Any) -> None:
         if cls._is_env_override(key):
-            logger.debug(
-                'Пропуск применения настройки %s: значение задано через окружение',
-                key,
-            )
+            logger.debug('Пропуск применения настройки : значение задано через окружение', key=key)
             return
         try:
             setattr(settings, key, value)
@@ -1607,10 +1602,14 @@ class BotConfigurationService:
                         run_immediately=(key == 'REMNAWAVE_AUTO_SYNC_ENABLED' and bool(value))
                     )
                 except Exception as error:
-                    logger.error(
-                        'Не удалось обновить сервис автосинхронизации RemnaWave: %s',
-                        error,
-                    )
+                    logger.error('Не удалось обновить сервис автосинхронизации RemnaWave', error=error)
+            elif key == 'SUPPORT_SYSTEM_MODE':
+                try:
+                    from app.services.support_settings_service import SupportSettingsService
+
+                    SupportSettingsService.set_system_mode(str(value))
+                except Exception as error:
+                    logger.error('Не удалось синхронизировать SupportSettingsService', error=error)
             elif key in {
                 'REMNAWAVE_API_URL',
                 'REMNAWAVE_API_KEY',
@@ -1624,12 +1623,9 @@ class BotConfigurationService:
 
                     remnawave_sync_service.refresh_configuration()
                 except Exception as error:
-                    logger.error(
-                        'Не удалось обновить конфигурацию сервиса автосинхронизации RemnaWave: %s',
-                        error,
-                    )
+                    logger.error('Не удалось обновить конфигурацию сервиса автосинхронизации RemnaWave', error=error)
         except Exception as error:
-            logger.error('Не удалось применить значение %s=%s: %s', key, value, error)
+            logger.error('Не удалось применить значение', key=key, setting_value=value, error=error)
 
     @staticmethod
     async def _sync_default_web_api_token() -> None:

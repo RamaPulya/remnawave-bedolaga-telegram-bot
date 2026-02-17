@@ -1,8 +1,8 @@
 """Contest handlers for daily games."""
 
-import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
+import structlog
 from aiogram import Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -22,7 +22,7 @@ from app.states import ContestStates
 from app.utils.decorators import auth_required, error_handler
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Rate limiting storage
 _rate_limits: dict = {}
@@ -34,7 +34,7 @@ _attempt_service = ContestAttemptService()
 def _check_rate_limit(user_id: int, action: str, limit: int = 1, window_seconds: int = 5) -> bool:
     """Check if user exceeds rate limit for contest actions."""
     key = f'{user_id}_{action}'
-    now = datetime.utcnow().timestamp()
+    now = datetime.now(UTC).timestamp()
 
     if key not in _rate_limits:
         _rate_limits[key] = []

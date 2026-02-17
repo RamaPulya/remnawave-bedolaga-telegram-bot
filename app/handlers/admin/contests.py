@@ -1,8 +1,8 @@
-import logging
 import math
 from datetime import UTC, datetime, time
 from zoneinfo import ZoneInfo
 
+import structlog
 from aiogram import Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,7 +35,7 @@ from app.states import AdminStates
 from app.utils.decorators import admin_required, error_handler
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 PAGE_SIZE = 5
 
@@ -44,7 +44,7 @@ def _ensure_timezone(tz_name: str) -> ZoneInfo:
     try:
         return ZoneInfo(tz_name)
     except Exception:
-        logger.warning('Не удалось загрузить TZ %s, используем UTC', tz_name)
+        logger.warning('Не удалось загрузить TZ , используем UTC', tz_name=tz_name)
         return ZoneInfo('UTC')
 
 
@@ -399,7 +399,7 @@ async def delete_contest(
         await callback.answer(texts.t('ADMIN_CONTEST_NOT_FOUND', 'Конкурс не найден.'), show_alert=True)
         return
 
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(UTC)
     if contest.is_active or contest.end_at > now_utc:
         await callback.answer(
             texts.t('ADMIN_CONTEST_DELETE_RESTRICT', 'Удалять можно только завершённые конкурсы.'),
@@ -628,8 +628,8 @@ async def finalize_contest_creation(message: types.Message, state: FSMContext, d
         await message.answer(texts.t('ADMIN_CONTEST_INVALID_DATE', 'Не удалось распознать дату.'))
         return
 
-    start_at = datetime.fromisoformat(start_at_raw).astimezone(UTC).replace(tzinfo=None)
-    end_at = datetime.fromisoformat(end_at_raw).astimezone(UTC).replace(tzinfo=None)
+    start_at = datetime.fromisoformat(start_at_raw).astimezone(UTC)
+    end_at = datetime.fromisoformat(end_at_raw).astimezone(UTC)
 
     contest_type = data.get('contest_type') or 'referral_paid'
 

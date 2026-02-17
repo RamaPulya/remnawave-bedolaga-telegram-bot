@@ -1,9 +1,9 @@
 """Promo offers routes for cabinet - personal discounts and offers."""
 
-import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import and_, select
@@ -22,7 +22,7 @@ from app.services.promo_offer_service import promo_offer_service
 from ..dependencies import get_cabinet_db, get_current_cabinet_user
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix='/promo', tags=['Cabinet Promo'])
 
@@ -112,7 +112,7 @@ async def get_promo_offers(
     db: AsyncSession = Depends(get_cabinet_db),
 ):
     """Get list of available promo offers for the user."""
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
 
     result = await db.execute(
         select(DiscountOffer)
@@ -151,7 +151,7 @@ async def get_active_discount(
     expires_at = user.promo_offer_discount_expires_at
     source = user.promo_offer_discount_source
 
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     is_active = discount_percent > 0 and (expires_at is None or expires_at > now)
 
     return ActiveDiscountInfo(
@@ -284,7 +284,7 @@ async def claim_promo_offer(
             detail='Offer not found',
         )
 
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
 
     if offer.claimed_at is not None:
         raise HTTPException(
@@ -408,7 +408,7 @@ async def clear_active_discount(
     user.promo_offer_discount_percent = 0
     user.promo_offer_discount_source = None
     user.promo_offer_discount_expires_at = None
-    user.updated_at = datetime.utcnow()
+    user.updated_at = datetime.now(UTC)
 
     await db.commit()
 

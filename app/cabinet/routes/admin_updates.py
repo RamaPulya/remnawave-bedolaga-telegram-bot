@@ -1,9 +1,9 @@
 """Admin routes for version and release information."""
 
-import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import aiohttp
+import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
@@ -13,7 +13,7 @@ from app.services.version_service import version_service
 from ..dependencies import get_current_admin_user
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix='/admin/updates', tags=['Cabinet Admin Updates'])
 
@@ -53,7 +53,7 @@ async def _fetch_cabinet_releases(force: bool = False) -> list[dict]:
     global _cabinet_last_check
 
     if not force and _cabinet_cache.get('releases') and _cabinet_last_check:
-        if datetime.now() - _cabinet_last_check < timedelta(seconds=_CACHE_TTL):
+        if datetime.now(UTC) - _cabinet_last_check < timedelta(seconds=_CACHE_TTL):
             return _cabinet_cache['releases']
 
     url = f'https://api.github.com/repos/{CABINET_REPO}/releases'
@@ -75,16 +75,16 @@ async def _fetch_cabinet_releases(force: bool = False) -> list[dict]:
                         }
                     )
                 _cabinet_cache['releases'] = releases
-                _cabinet_last_check = datetime.now()
-                logger.info('Fetched %d cabinet releases from GitHub', len(releases))
+                _cabinet_last_check = datetime.now(UTC)
+                logger.info('Fetched cabinet releases from GitHub', releases_count=len(releases))
                 return releases
-            logger.warning('GitHub API returned status %d for cabinet releases', response.status)
+            logger.warning('GitHub API returned status for cabinet releases', response_status=response.status)
             return _cabinet_cache.get('releases', [])
     except TimeoutError:
         logger.warning('Timeout fetching cabinet releases from GitHub')
         return _cabinet_cache.get('releases', [])
     except Exception as e:
-        logger.error('Error fetching cabinet releases: %s', e)
+        logger.error('Error fetching cabinet releases', e=e)
         return _cabinet_cache.get('releases', [])
 
 

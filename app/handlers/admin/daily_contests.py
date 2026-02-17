@@ -1,7 +1,7 @@
 import json
-import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
+import structlog
 from aiogram import Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,7 +23,7 @@ from app.states import AdminStates
 from app.utils.decorators import admin_required, error_handler
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 EDITABLE_FIELDS: dict[str, dict] = {
     'prize_type': {'type': str, 'label': 'тип приза (days/balance/custom)'},
@@ -171,7 +171,7 @@ async def start_round_now(
         await db.refresh(tpl)
 
     payload = contest_rotation_service._build_payload_for_template(tpl)  # type: ignore[attr-defined]
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     ends = now + timedelta(hours=tpl.cooldown_hours)
     await create_round(
         db,
@@ -182,8 +182,8 @@ async def start_round_now(
     )
     await contest_rotation_service._announce_round_start(  # type: ignore[attr-defined]
         tpl,
-        now.replace(tzinfo=None),
-        ends.replace(tzinfo=None),
+        now,
+        ends,
     )
     await callback.answer(texts.t('ADMIN_ROUND_STARTED', 'Раунд запущен'), show_alert=True)
     await show_daily_contest(callback, db_user, db)
@@ -214,7 +214,7 @@ async def manual_start_round(
 
     # Для ручного старта не включаем конкурс, если он выключен
     payload = contest_rotation_service._build_payload_for_template(tpl)  # type: ignore[attr-defined]
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     ends = now + timedelta(hours=tpl.cooldown_hours)
     await create_round(
         db,
@@ -227,8 +227,8 @@ async def manual_start_round(
     # Анонсируем всем пользователям (как тест)
     await contest_rotation_service._announce_round_start(  # type: ignore[attr-defined]
         tpl,
-        now.replace(tzinfo=None),
-        ends.replace(tzinfo=None),
+        now,
+        ends,
     )
     await callback.answer(texts.t('ADMIN_ROUND_STARTED', 'Тестовый раунд запущен'), show_alert=True)
     await show_daily_contest(callback, db_user, db)
@@ -431,7 +431,7 @@ async def start_all_contests(
             continue  # уже запущен
 
         payload = contest_rotation_service._build_payload_for_template(tpl)  # type: ignore[attr-defined]
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         ends = now + timedelta(hours=tpl.cooldown_hours)
         await create_round(
             db,
@@ -442,8 +442,8 @@ async def start_all_contests(
         )
         await contest_rotation_service._announce_round_start(  # type: ignore[attr-defined]
             tpl,
-            now.replace(tzinfo=None),
-            ends.replace(tzinfo=None),
+            now,
+            ends,
         )
         started_count += 1
 

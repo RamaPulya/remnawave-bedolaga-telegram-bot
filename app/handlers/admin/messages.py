@@ -1,8 +1,8 @@
 import asyncio
 import html
-import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
+import structlog
 from aiogram import Dispatcher, F, types
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.fsm.context import FSMContext
@@ -45,10 +45,10 @@ from app.services.pinned_message_service import (
 )
 from app.states import AdminStates
 from app.utils.decorators import admin_required, error_handler
-from app.utils.miniapp_buttons import build_miniapp_or_callback_button
+from app.utils.miniapp_buttons import BUTTON_KEY_TO_CABINET_PATH, build_miniapp_or_callback_button
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def safe_edit_or_send_text(callback: types.CallbackQuery, text: str, reply_markup=None, parse_mode: str = 'HTML'):
@@ -76,12 +76,14 @@ async def safe_edit_or_send_text(callback: types.CallbackQuery, text: str, reply
 BUTTON_ROWS = BROADCAST_BUTTON_ROWS
 DEFAULT_SELECTED_BUTTONS = DEFAULT_BROADCAST_BUTTONS
 
-TEXT_MENU_MINIAPP_BUTTON_KEYS = {
+CABINET_MINIAPP_BUTTON_KEYS = {
     'balance',
     'referrals',
     'promocode',
     'connect',
     'subscription',
+    'support',
+    'home',
 }
 
 
@@ -106,11 +108,12 @@ def create_broadcast_keyboard(selected_buttons: list, language: str = 'ru') -> t
             if button_key not in selected_buttons:
                 continue
             button_config = button_config_map[button_key]
-            if settings.is_text_main_menu_mode() and button_key in TEXT_MENU_MINIAPP_BUTTON_KEYS:
+            if settings.is_cabinet_mode() and button_key in CABINET_MINIAPP_BUTTON_KEYS:
                 row_buttons.append(
                     build_miniapp_or_callback_button(
                         text=button_config['text'],
                         callback_data=button_config['callback'],
+                        cabinet_path=BUTTON_KEY_TO_CABINET_PATH.get(button_key, ''),
                     )
                 )
             else:
@@ -145,7 +148,7 @@ async def _persist_broadcast_result(
         failed_count: Количество неудачных отправок
         status: Финальный статус рассылки ('completed', 'partial', 'failed')
     """
-    completed_at = datetime.utcnow()
+    completed_at = datetime.now(UTC)
     max_retries = 3
     retry_delay = 1.0
 
@@ -155,8 +158,7 @@ async def _persist_broadcast_result(
                 broadcast_history = await session.get(BroadcastHistory, broadcast_id)
                 if not broadcast_history:
                     logger.critical(
-                        'Не удалось найти запись BroadcastHistory #%s для записи результатов',
-                        broadcast_id,
+                        'Не удалось найти запись BroadcastHistory # для записи результатов', broadcast_id=broadcast_id
                     )
                     return
 
@@ -167,35 +169,35 @@ async def _persist_broadcast_result(
                 await session.commit()
 
                 logger.info(
-                    'Результаты рассылки сохранены (id=%s, sent=%d, failed=%d, status=%s)',
-                    broadcast_id,
-                    sent_count,
-                    failed_count,
-                    status,
+                    'Результаты рассылки сохранены (id sent failed status=)',
+                    broadcast_id=broadcast_id,
+                    sent_count=sent_count,
+                    failed_count=failed_count,
+                    status=status,
                 )
                 return
 
         except InterfaceError as error:
             logger.warning(
-                'Ошибка соединения при сохранении результатов рассылки (попытка %d/%d): %s',
-                attempt,
-                max_retries,
-                error,
+                'Ошибка соединения при сохранении результатов рассылки (попытка /)',
+                attempt=attempt,
+                max_retries=max_retries,
+                error=error,
             )
             if attempt < max_retries:
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2
             else:
                 logger.critical(
-                    'Не удалось сохранить результаты рассылки после %d попыток (id=%s)',
-                    max_retries,
-                    broadcast_id,
+                    'Не удалось сохранить результаты рассылки после попыток (id=)',
+                    max_retries=max_retries,
+                    broadcast_id=broadcast_id,
                 )
 
         except Exception as error:
             logger.critical(
-                'Неожиданная ошибка при сохранении результатов рассылки (id=%s)',
-                broadcast_id,
+                'Неожиданная ошибка при сохранении результатов рассылки (id=)',
+                broadcast_id=broadcast_id,
                 exc_info=error,
             )
             return
@@ -307,7 +309,7 @@ async def toggle_pinned_message_position(
         return
 
     pinned_message.send_before_menu = not pinned_message.send_before_menu
-    pinned_message.updated_at = datetime.utcnow()
+    pinned_message.updated_at = datetime.now(UTC)
     await db.commit()
 
     await show_pinned_message_menu(callback, db_user, db, state)
@@ -327,7 +329,7 @@ async def toggle_pinned_message_start_mode(
         return
 
     pinned_message.send_on_every_start = not pinned_message.send_on_every_start
-    pinned_message.updated_at = datetime.utcnow()
+    pinned_message.updated_at = datetime.now(UTC)
     await db.commit()
 
     await show_pinned_message_menu(callback, db_user, db, state)
@@ -1265,11 +1267,11 @@ async def confirm_broadcast(callback: types.CallbackQuery, db_user: User, state:
                 wait_seconds = e.retry_after + 1
                 flood_wait_until = asyncio.get_event_loop().time() + wait_seconds
                 logger.warning(
-                    'FloodWait: Telegram просит подождать %d сек (пользователь %d, попытка %d/%d)',
-                    e.retry_after,
-                    telegram_id,
-                    attempt + 1,
-                    _MAX_SEND_RETRIES,
+                    'FloodWait: Telegram просит подождать сек (пользователь , попытка /)',
+                    retry_after=e.retry_after,
+                    telegram_id=telegram_id,
+                    attempt=attempt + 1,
+                    MAX_SEND_RETRIES=_MAX_SEND_RETRIES,
                 )
                 await asyncio.sleep(wait_seconds)
 
@@ -1277,16 +1279,16 @@ async def confirm_broadcast(callback: types.CallbackQuery, db_user: User, state:
                 return False
 
             except TelegramBadRequest as e:
-                logger.debug('BadRequest при рассылке пользователю %d: %s', telegram_id, e)
+                logger.debug('BadRequest при рассылке пользователю', telegram_id=telegram_id, e=e)
                 return False
 
             except Exception as e:
                 logger.error(
-                    'Ошибка отправки пользователю %d (попытка %d/%d): %s',
-                    telegram_id,
-                    attempt + 1,
-                    _MAX_SEND_RETRIES,
-                    e,
+                    'Ошибка отправки пользователю (попытка /)',
+                    telegram_id=telegram_id,
+                    attempt=attempt + 1,
+                    MAX_SEND_RETRIES=_MAX_SEND_RETRIES,
+                    e=e,
                 )
                 if attempt < _MAX_SEND_RETRIES - 1:
                     await asyncio.sleep(0.5 * (attempt + 1))
@@ -1338,7 +1340,7 @@ async def confirm_broadcast(callback: types.CallbackQuery, db_user: User, state:
             await progress_message.edit_text(text, parse_mode='HTML')
         except TelegramRetryAfter as e:
             # Не паникуем — пропускаем обновление прогресса
-            logger.debug('FloodWait при обновлении прогресса, пропускаем: %d сек', e.retry_after)
+            logger.debug('FloodWait при обновлении прогресса, пропускаем: сек', retry_after=e.retry_after)
         except TelegramBadRequest:
             # Сообщение удалено или контент не изменился — отправляем новое
             try:
@@ -1375,7 +1377,7 @@ async def confirm_broadcast(callback: types.CallbackQuery, db_user: User, state:
                     failed_count += 1
             elif isinstance(result, Exception):
                 failed_count += 1
-                logger.error('Необработанное исключение в рассылке: %s', result)
+                logger.error('Необработанное исключение в рассылке', result=result)
 
         # Обновляем прогресс каждые _PROGRESS_UPDATE_INTERVAL батчей
         if batch_idx % _PROGRESS_UPDATE_INTERVAL == 0:
@@ -1387,7 +1389,7 @@ async def confirm_broadcast(callback: types.CallbackQuery, db_user: User, state:
     # Учитываем пропущенных email-only пользователей
     skipped_email_users = total_users_count - total_recipients
     if skipped_email_users > 0:
-        logger.info('Пропущено %d email-only пользователей при рассылке', skipped_email_users)
+        logger.info('Пропущено email-only пользователей при рассылке', skipped_email_users=skipped_email_users)
 
     status = 'completed' if failed_count == 0 else 'partial'
 
@@ -1436,18 +1438,18 @@ async def confirm_broadcast(callback: types.CallbackQuery, db_user: User, state:
 
     await state.clear()
     logger.info(
-        'Рассылка завершена админом %s: sent=%d, failed=%d, total=%d (медиа: %s)',
-        admin_telegram_id,
-        sent_count,
-        failed_count,
-        total_users_count,
-        has_media,
+        'Рассылка завершена админом : sent failed total= (медиа:)',
+        admin_telegram_id=admin_telegram_id,
+        sent_count=sent_count,
+        failed_count=failed_count,
+        total_users_count=total_users_count,
+        has_media=has_media,
     )
 
 
 async def get_target_users_count(db: AsyncSession, target: str) -> int:
     """Быстрый подсчёт пользователей через SQL COUNT вместо загрузки всех в память."""
-    from datetime import datetime, timedelta
+    from datetime import UTC, datetime, timedelta
 
     from sqlalchemy import distinct, func as sql_func
 
@@ -1501,7 +1503,7 @@ async def get_target_users_count(db: AsyncSession, target: str) -> int:
 
     if target == 'expiring':
         # Истекающие в ближайшие 3 дня
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         expiry_threshold = now + timedelta(days=3)
         query = (
             select(sql_func.count(distinct(User.id)))
@@ -1518,7 +1520,7 @@ async def get_target_users_count(db: AsyncSession, target: str) -> int:
 
     if target == 'expiring_subscribers':
         # Истекающие в ближайшие 7 дней
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         expiry_threshold = now + timedelta(days=7)
         query = (
             select(sql_func.count(distinct(User.id)))
@@ -1535,7 +1537,7 @@ async def get_target_users_count(db: AsyncSession, target: str) -> int:
 
     if target == 'expired':
         # Истекшие подписки
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         expired_statuses = [SubscriptionStatus.EXPIRED.value, SubscriptionStatus.DISABLED.value]
         query = (
             select(sql_func.count(distinct(User.id)))
@@ -1554,7 +1556,7 @@ async def get_target_users_count(db: AsyncSession, target: str) -> int:
 
     if target == 'expired_subscribers':
         # То же что и expired
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         expired_statuses = [SubscriptionStatus.EXPIRED.value, SubscriptionStatus.DISABLED.value]
         query = (
             select(sql_func.count(distinct(User.id)))
@@ -1632,7 +1634,7 @@ async def get_target_users_count(db: AsyncSession, target: str) -> int:
 
     # Custom filters — быстрый COUNT вместо загрузки всех пользователей
     if target.startswith('custom_'):
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         today = now.replace(hour=0, minute=0, second=0, microsecond=0)
         criteria = target[len('custom_') :]
 
@@ -1702,7 +1704,7 @@ async def get_target_users(db: AsyncSession, target: str) -> list:
         return [sub.user for sub in expiring_subs if sub.user]
 
     if target == 'expired':
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         expired_statuses = {
             SubscriptionStatus.EXPIRED.value,
             SubscriptionStatus.DISABLED.value,
@@ -1753,7 +1755,7 @@ async def get_target_users(db: AsyncSession, target: str) -> list:
         return [sub.user for sub in expiring_subs if sub.user]
 
     if target == 'expired_subscribers':
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         expired_statuses = {
             SubscriptionStatus.EXPIRED.value,
             SubscriptionStatus.DISABLED.value,
@@ -1780,7 +1782,7 @@ async def get_target_users(db: AsyncSession, target: str) -> list:
         ]
 
     if target == 'trial_ending':
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         in_3_days = now + timedelta(days=3)
         return [
             user
@@ -1792,7 +1794,7 @@ async def get_target_users(db: AsyncSession, target: str) -> list:
         ]
 
     if target == 'trial_expired':
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         return [
             user
             for user in users
@@ -1802,7 +1804,7 @@ async def get_target_users(db: AsyncSession, target: str) -> list:
     if target == 'autopay_failed':
         from app.database.models import SubscriptionEvent
 
-        week_ago = datetime.utcnow() - timedelta(days=7)
+        week_ago = datetime.now(UTC) - timedelta(days=7)
         stmt = (
             select(SubscriptionEvent.user_id)
             .where(
@@ -1824,15 +1826,15 @@ async def get_target_users(db: AsyncSession, target: str) -> list:
         ]
 
     if target == 'inactive_30d':
-        threshold = datetime.utcnow() - timedelta(days=30)
+        threshold = datetime.now(UTC) - timedelta(days=30)
         return [user for user in users if user.last_activity and user.last_activity < threshold]
 
     if target == 'inactive_60d':
-        threshold = datetime.utcnow() - timedelta(days=60)
+        threshold = datetime.now(UTC) - timedelta(days=60)
         return [user for user in users if user.last_activity and user.last_activity < threshold]
 
     if target == 'inactive_90d':
-        threshold = datetime.utcnow() - timedelta(days=90)
+        threshold = datetime.now(UTC) - timedelta(days=90)
         return [user for user in users if user.last_activity and user.last_activity < threshold]
 
     # Фильтр по тарифу
@@ -1853,7 +1855,7 @@ async def get_custom_users_count(db: AsyncSession, criteria: str) -> int:
 
 
 async def get_custom_users(db: AsyncSession, criteria: str) -> list:
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = now - timedelta(days=7)
     month_ago = now - timedelta(days=30)
@@ -1882,7 +1884,7 @@ async def get_custom_users(db: AsyncSession, criteria: str) -> list:
 
 
 async def get_users_statistics(db: AsyncSession) -> dict:
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = now - timedelta(days=7)
     month_ago = now - timedelta(days=30)

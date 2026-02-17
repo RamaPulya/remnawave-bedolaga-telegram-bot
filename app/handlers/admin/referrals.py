@@ -1,7 +1,8 @@
 import datetime
 import json
-import logging
+from datetime import UTC
 
+import structlog
 from aiogram import Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from sqlalchemy import select
@@ -20,7 +21,7 @@ from app.states import AdminStates
 from app.utils.decorators import admin_required, error_handler
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @admin_required
@@ -33,7 +34,7 @@ async def show_referral_statistics(callback: types.CallbackQuery, db_user: User,
         if stats.get('active_referrers', 0) > 0:
             avg_per_referrer = stats.get('total_paid_kopeks', 0) / stats['active_referrers']
 
-        current_time = datetime.datetime.now().strftime('%H:%M:%S')
+        current_time = datetime.datetime.now(UTC).strftime('%H:%M:%S')
 
         text = f"""
 🤝 <b>Реферальная статистика</b>
@@ -64,7 +65,7 @@ async def show_referral_statistics(callback: types.CallbackQuery, db_user: User,
                 if count > 0:
                     text += f'{i}. ID {user_id}: {settings.format_price(earned)} ({count} реф.)\n'
                 else:
-                    logger.warning(f'Реферер {user_id} имеет {count} рефералов, но есть в топе')
+                    logger.warning('Реферер имеет рефералов, но есть в топе', user_id=user_id, count=count)
         else:
             text += 'Нет данных\n'
 
@@ -108,13 +109,13 @@ async def show_referral_statistics(callback: types.CallbackQuery, db_user: User,
             if 'message is not modified' in str(edit_error):
                 await callback.answer('Данные актуальны')
             else:
-                logger.error(f'Ошибка редактирования сообщения: {edit_error}')
+                logger.error('Ошибка редактирования сообщения', edit_error=edit_error)
                 await callback.answer('Ошибка обновления')
 
     except Exception as e:
-        logger.error(f'Ошибка в show_referral_statistics: {e}', exc_info=True)
+        logger.error('Ошибка в show_referral_statistics', error=e, exc_info=True)
 
-        current_time = datetime.datetime.now().strftime('%H:%M:%S')
+        current_time = datetime.datetime.now(UTC).strftime('%H:%M:%S')
         text = f"""
 🤝 <b>Реферальная статистика</b>
 
@@ -253,7 +254,7 @@ async def _show_top_referrers_filtered(callback: types.CallbackQuery, db: AsyncS
                 raise
 
     except Exception as e:
-        logger.error(f'Ошибка в show_top_referrers_filtered: {e}', exc_info=True)
+        logger.error('Ошибка в show_top_referrers_filtered', error=e, exc_info=True)
         await callback.answer('Ошибка загрузки топа рефереров')
 
 
@@ -448,7 +449,7 @@ async def approve_withdrawal_request(callback: types.CallbackQuery, db_user: Use
                     ).format(id=request.id, amount=texts.format_price(request.amount_kopeks)),
                 )
             except Exception as e:
-                logger.error(f'Ошибка отправки уведомления пользователю: {e}')
+                logger.error('Ошибка отправки уведомления пользователю', error=e)
 
         await callback.answer('✅ Заявка одобрена, средства списаны с баланса')
 
@@ -489,7 +490,7 @@ async def reject_withdrawal_request(callback: types.CallbackQuery, db_user: User
                     ).format(id=request.id, amount=texts.format_price(request.amount_kopeks)),
                 )
             except Exception as e:
-                logger.error(f'Ошибка отправки уведомления пользователю: {e}')
+                logger.error('Ошибка отправки уведомления пользователю', error=e)
 
         await callback.answer('❌ Заявка отклонена')
 
@@ -530,7 +531,7 @@ async def complete_withdrawal_request(callback: types.CallbackQuery, db_user: Us
                     ).format(id=request.id, amount=texts.format_price(request.amount_kopeks)),
                 )
             except Exception as e:
-                logger.error(f'Ошибка отправки уведомления пользователю: {e}')
+                logger.error('Ошибка отправки уведомления пользователю', error=e)
 
         await callback.answer('✅ Заявка выполнена')
 
@@ -647,13 +648,16 @@ async def process_test_referral_earning(message: types.Message, db_user: User, d
     )
 
     logger.info(
-        f'Тестовое начисление: админ {db_user.telegram_id} начислил {amount_rubles}₽ пользователю {target_telegram_id}'
+        'Тестовое начисление: админ начислил ₽ пользователю',
+        telegram_id=db_user.telegram_id,
+        amount_rubles=amount_rubles,
+        target_telegram_id=target_telegram_id,
     )
 
 
 def _get_period_dates(period: str) -> tuple[datetime.datetime, datetime.datetime]:
     """Возвращает начальную и конечную даты для заданного периода."""
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(UTC)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     if period == 'today':
@@ -794,7 +798,7 @@ async def _show_diagnostics_for_period(callback: types.CallbackQuery, db: AsyncS
         await callback.message.edit_text(text, reply_markup=keyboard)
 
     except Exception as e:
-        logger.error(f'Ошибка в _show_diagnostics_for_period: {e}', exc_info=True)
+        logger.error('Ошибка в _show_diagnostics_for_period', error=e, exc_info=True)
         await callback.answer('Ошибка при анализе логов', show_alert=True)
 
 
@@ -899,7 +903,7 @@ async def preview_referral_fixes(callback: types.CallbackQuery, db_user: User, d
         await callback.message.edit_text(text, reply_markup=keyboard)
 
     except Exception as e:
-        logger.error(f'Ошибка в preview_referral_fixes: {e}', exc_info=True)
+        logger.error('Ошибка в preview_referral_fixes', error=e, exc_info=True)
         await callback.answer('Ошибка при создании предпросмотра', show_alert=True)
 
 
@@ -1002,7 +1006,7 @@ async def apply_referral_fixes(callback: types.CallbackQuery, db_user: User, db:
             await state.update_data(uploaded_file_report=None)
 
     except Exception as e:
-        logger.error(f'Ошибка в apply_referral_fixes: {e}', exc_info=True)
+        logger.error('Ошибка в apply_referral_fixes', error=e, exc_info=True)
         await callback.answer('Ошибка при применении исправлений', show_alert=True)
 
 
@@ -1075,7 +1079,7 @@ async def check_missing_bonuses(callback: types.CallbackQuery, db_user: User, db
         await callback.message.edit_text(text, reply_markup=keyboard)
 
     except Exception as e:
-        logger.error(f'Ошибка в check_missing_bonuses: {e}', exc_info=True)
+        logger.error('Ошибка в check_missing_bonuses', error=e, exc_info=True)
         await callback.answer('Ошибка при проверке бонусов', show_alert=True)
 
 
@@ -1134,7 +1138,7 @@ async def apply_missing_bonuses(callback: types.CallbackQuery, db_user: User, db
         await callback.message.edit_text(text, reply_markup=keyboard)
 
     except Exception as e:
-        logger.error(f'Ошибка в apply_missing_bonuses: {e}', exc_info=True)
+        logger.error('Ошибка в apply_missing_bonuses', error=e, exc_info=True)
         await callback.answer('Ошибка при начислении бонусов', show_alert=True)
 
 
@@ -1150,9 +1154,9 @@ async def sync_referrals_with_contest(
     await callback.answer('🏆 Синхронизирую с конкурсами...')
 
     try:
-        from datetime import datetime
+        from datetime import UTC, datetime
 
-        now_utc = datetime.utcnow()
+        now_utc = datetime.now(UTC)
 
         # Получаем активные конкурсы
         paid_contests = await get_contests_for_events(db, now_utc, contest_types=['referral_paid'])
@@ -1211,7 +1215,7 @@ async def sync_referrals_with_contest(
         await callback.message.edit_text(text, reply_markup=keyboard)
 
     except Exception as e:
-        logger.error(f'Ошибка в sync_referrals_with_contest: {e}', exc_info=True)
+        logger.error('Ошибка в sync_referrals_with_contest', error=e, exc_info=True)
         await callback.answer('Ошибка при синхронизации', show_alert=True)
 
 
@@ -1306,7 +1310,7 @@ async def receive_log_file(message: types.Message, db_user: User, db: AsyncSessi
         file = await message.bot.get_file(message.document.file_id)
         await message.bot.download_file(file.file_path, temp_file_path)
 
-        logger.info(f'📥 Файл загружен: {temp_file_path} ({message.document.file_size} байт)')
+        logger.info('📥 Файл загружен: ( байт)', temp_file_path=temp_file_path, file_size=message.document.file_size)
 
         # Обновляем статус
         await status_message.edit_text(f'🔍 Анализирую файл {file_name}...\n\nЭто может занять некоторое время.')
@@ -1396,7 +1400,7 @@ async def receive_log_file(message: types.Message, db_user: User, db: AsyncSessi
         await state.set_state(AdminStates.referral_diagnostics_period)
 
     except Exception as e:
-        logger.error(f'❌ Ошибка при обработке файла: {e}', exc_info=True)
+        logger.error('❌ Ошибка при обработке файла', error=e, exc_info=True)
 
         try:
             await status_message.edit_text(
@@ -1434,9 +1438,9 @@ async def receive_log_file(message: types.Message, db_user: User, db: AsyncSessi
         if temp_file_path and Path(temp_file_path).exists():
             try:
                 Path(temp_file_path).unlink()
-                logger.info(f'🗑️ Временный файл удалён: {temp_file_path}')
+                logger.info('🗑️ Временный файл удалён', temp_file_path=temp_file_path)
             except Exception as e:
-                logger.error(f'Ошибка удаления временного файла: {e}')
+                logger.error('Ошибка удаления временного файла', error=e)
 
 
 def register_handlers(dp: Dispatcher):

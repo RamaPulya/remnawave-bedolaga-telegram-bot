@@ -1,7 +1,7 @@
-import logging
 from collections.abc import Sequence
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
 
+import structlog
 from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -16,7 +16,7 @@ from app.database.models import (
 )
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def create_referral_contest(
@@ -165,7 +165,7 @@ async def add_contest_event(
         referral_id=referral_id,
         amount_kopeks=amount_kopeks,
         event_type=event_type,
-        occurred_at=datetime.utcnow(),
+        occurred_at=datetime.now(UTC),
     )
     db.add(event)
     await db.commit()
@@ -440,7 +440,7 @@ async def get_contest_transaction_breakdown(
 
     # Сумма покупок подписок
     subscription_result = await db.execute(
-        select(func.coalesce(func.sum(Transaction.amount_kopeks), 0)).where(
+        select(func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0)).where(
             and_(
                 Transaction.user_id.in_(referral_ids),
                 Transaction.is_completed.is_(True),
@@ -512,7 +512,7 @@ async def upsert_contest_event(
         referral_id=referral_id,
         amount_kopeks=amount_kopeks,
         event_type=event_type,
-        occurred_at=datetime.utcnow(),
+        occurred_at=datetime.now(UTC),
     )
     db.add(event)
     await db.commit()
@@ -621,10 +621,10 @@ async def debug_contest_transactions(
         tx.amount_kopeks for tx in txs_in if tx.type == TransactionType.DEPOSIT.value and tx.payment_method is not None
     )
     subscription_in_period = sum(
-        tx.amount_kopeks for tx in txs_in if tx.type == TransactionType.SUBSCRIPTION_PAYMENT.value
+        abs(tx.amount_kopeks) for tx in txs_in if tx.type == TransactionType.SUBSCRIPTION_PAYMENT.value
     )
     total_in_period = deposit_in_period + subscription_in_period
-    total_outside = sum(tx.amount_kopeks for tx in txs_out)
+    total_outside = sum(abs(tx.amount_kopeks) for tx in txs_out)
 
     # Подсчёт ПОЛНЫХ сумм (не только sample, БЕЗ бонусов)
     full_deposit_result = await db.execute(
@@ -642,7 +642,7 @@ async def debug_contest_transactions(
     full_deposit_total = int(full_deposit_result.scalar_one() or 0)
 
     full_subscription_result = await db.execute(
-        select(func.coalesce(func.sum(Transaction.amount_kopeks), 0)).where(
+        select(func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0)).where(
             and_(
                 Transaction.user_id.in_(referral_ids),
                 Transaction.is_completed.is_(True),
@@ -725,7 +725,12 @@ async def sync_contest_events(
         # Конец дня: 23:59:59.999999
         contest_end = contest_end.replace(hour=23, minute=59, second=59, microsecond=999999)
 
-    logger.info('Синхронизация конкурса %s: период с %s по %s', contest_id, contest_start, contest_end)
+    logger.info(
+        'Синхронизация конкурса : период с по',
+        contest_id=contest_id,
+        contest_start=contest_start,
+        contest_end=contest_end,
+    )
 
     stats = {
         'updated': 0,
@@ -768,7 +773,7 @@ async def sync_contest_events(
 
     for event in events:
         # Считаем ТОЛЬКО покупки подписок (реальные траты на подписки)
-        subscription_query = select(func.coalesce(func.sum(Transaction.amount_kopeks), 0)).where(
+        subscription_query = select(func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0)).where(
             and_(
                 Transaction.user_id == event.referral_id,
                 Transaction.is_completed.is_(True),
@@ -815,7 +820,11 @@ async def sync_contest_events(
             # Логируем значительные изменения
             if abs(old_amount - total_paid) > 10000:  # больше 100 руб разницы
                 logger.debug(
-                    'Событие %s (реферал %s): %s -> %s коп.', event.id, event.referral_id, old_amount, total_paid
+                    'Событие (реферал): -> коп.',
+                    event_id=event.id,
+                    referral_id=event.referral_id,
+                    old_amount=old_amount,
+                    total_paid=total_paid,
                 )
         else:
             stats['skipped'] += 1
@@ -824,11 +833,11 @@ async def sync_contest_events(
     await db.commit()
 
     logger.info(
-        'Синхронизация конкурса %s завершена: обновлено %s, пропущено %s, сумма %s коп.',
-        contest_id,
-        stats['updated'],
-        stats['skipped'],
-        stats['total_amount'],
+        'Синхронизация конкурса завершена: обновлено , пропущено , сумма коп.',
+        contest_id=contest_id,
+        stats=stats['updated'],
+        stats_2=stats['skipped'],
+        stats_3=stats['total_amount'],
     )
 
     return stats
@@ -861,7 +870,9 @@ async def cleanup_invalid_contest_events(
     if contest_end.hour == 0 and contest_end.minute == 0 and contest_end.second == 0:
         contest_end = contest_end.replace(hour=23, minute=59, second=59, microsecond=999999)
 
-    logger.info('Очистка конкурса %s: период с %s по %s', contest_id, contest_start, contest_end)
+    logger.info(
+        'Очистка конкурса : период с по', contest_id=contest_id, contest_start=contest_start, contest_end=contest_end
+    )
 
     # Считаем сколько было событий до очистки
     total_before_result = await db.execute(
@@ -905,11 +916,11 @@ async def cleanup_invalid_contest_events(
     remaining = int(remaining_result.scalar_one() or 0)
 
     logger.info(
-        'Очистка конкурса %s завершена: удалено %s невалидных событий, осталось %s валидных (было %s)',
-        contest_id,
-        deleted,
-        remaining,
-        total_before,
+        'Очистка конкурса завершена: удалено невалидных событий, осталось валидных (было)',
+        contest_id=contest_id,
+        deleted=deleted,
+        remaining=remaining,
+        total_before=total_before,
     )
 
     return {

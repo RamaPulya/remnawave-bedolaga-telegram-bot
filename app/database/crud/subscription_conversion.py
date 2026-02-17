@@ -1,13 +1,13 @@
-import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
+import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import SubscriptionConversion, User
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def create_subscription_conversion(
@@ -20,7 +20,7 @@ async def create_subscription_conversion(
 ) -> SubscriptionConversion:
     conversion = SubscriptionConversion(
         user_id=user_id,
-        converted_at=datetime.utcnow(),
+        converted_at=datetime.now(UTC),
         trial_duration_days=trial_duration_days,
         payment_method=payment_method,
         first_payment_amount_kopeks=first_payment_amount_kopeks,
@@ -32,7 +32,11 @@ async def create_subscription_conversion(
     await db.refresh(conversion)
 
     logger.info(
-        f'✅ Создана запись о конверсии для пользователя {user_id}: {trial_duration_days} дн. → {first_paid_period_days} дн. за {first_payment_amount_kopeks / 100}₽'
+        '✅ Создана запись о конверсии для пользователя дн. → дн. за ₽',
+        user_id=user_id,
+        trial_duration_days=trial_duration_days,
+        first_paid_period_days=first_paid_period_days,
+        first_payment_amount_kopeks=first_payment_amount_kopeks / 100,
     )
 
     return conversion
@@ -78,16 +82,16 @@ async def get_conversion_statistics(db: AsyncSession) -> dict:
     avg_first_payment_result = await db.execute(select(func.avg(SubscriptionConversion.first_payment_amount_kopeks)))
     avg_first_payment = avg_first_payment_result.scalar() or 0
 
-    month_ago = datetime.utcnow() - timedelta(days=30)
+    month_ago = datetime.now(UTC) - timedelta(days=30)
     month_conversions_result = await db.execute(
         select(func.count(SubscriptionConversion.id)).where(SubscriptionConversion.converted_at >= month_ago)
     )
     month_conversions = month_conversions_result.scalar() or 0
 
     logger.info('📊 Статистика конверсий:')
-    logger.info(f'   Всего пользователей с подписками: {total_users_with_subscriptions}')
-    logger.info(f'   Оплативших подписку: {users_with_paid}')
-    logger.info(f'   Рассчитанная конверсия: {conversion_rate}%')
+    logger.info('Всего пользователей с подписками', total_users_with_subscriptions=total_users_with_subscriptions)
+    logger.info('Оплативших подписку', users_with_paid=users_with_paid)
+    logger.info('Рассчитанная конверсия', conversion_rate=conversion_rate)
 
     return {
         'total_conversions': total_conversions,

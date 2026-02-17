@@ -1,8 +1,8 @@
 """Admin routes for managing users in cabinet."""
 
-import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import Integer, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,7 +35,7 @@ from app.database.models import (
     User,
     UserStatus,
 )
-from app.utils.timezone import panel_datetime_to_naive_utc
+from app.utils.timezone import panel_datetime_to_utc
 
 from ..dependencies import get_cabinet_db, get_current_admin_user
 from ..schemas.users import (
@@ -91,7 +91,7 @@ from ..schemas.users import (
 )
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix='/admin/users', tags=['Cabinet Admin Users'])
 
@@ -144,9 +144,9 @@ def _build_subscription_info(subscription: Subscription, tariff_name: str | None
     is_active = False
 
     if subscription.end_date:
-        delta = subscription.end_date - datetime.utcnow()
+        delta = subscription.end_date - datetime.now(UTC)
         days_remaining = max(0, delta.days)
-        is_active = subscription.status == SubscriptionStatus.ACTIVE.value and subscription.end_date > datetime.utcnow()
+        is_active = subscription.status == SubscriptionStatus.ACTIVE.value and subscription.end_date > datetime.now(UTC)
 
     return UserSubscriptionInfo(
         id=subscription.id,
@@ -174,7 +174,7 @@ async def _build_subscription_info_async(db: AsyncSession, subscription: Subscri
             tariff_name = tariff.name
 
     # Fetch traffic purchases
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     tp_query = (
         select(TrafficPurchase)
         .where(TrafficPurchase.subscription_id == subscription.id)
@@ -219,19 +219,19 @@ async def _sync_subscription_to_panel(db: AsyncSession, user: User, subscription
 
         service = RemnaWaveService()
         if not service.is_configured:
-            logger.warning(f'Remnawave not configured, skipping panel sync for user {user.id}')
+            logger.warning('Remnawave not configured, skipping panel sync for user', user_id=user.id)
             return {'skipped': True, 'reason': 'Remnawave not configured'}
 
         is_active = (
             subscription.status in (SubscriptionStatus.ACTIVE.value, SubscriptionStatus.TRIAL.value)
             and subscription.end_date
-            and subscription.end_date > datetime.utcnow()
+            and subscription.end_date > datetime.now(UTC)
         )
         panel_status = PanelUserStatus.ACTIVE if is_active else PanelUserStatus.DISABLED
 
         expire_at = subscription.end_date
-        if expire_at and expire_at <= datetime.utcnow():
-            expire_at = datetime.utcnow() + timedelta(minutes=1)
+        if expire_at and expire_at <= datetime.now(UTC):
+            expire_at = datetime.now(UTC) + timedelta(minutes=1)
 
         username = settings.format_remnawave_username(
             full_name=user.full_name,
@@ -260,7 +260,7 @@ async def _sync_subscription_to_panel(db: AsyncSession, user: User, subscription
             if panel_uuid:
                 existing_user = await api.get_user_by_uuid(panel_uuid)
                 if not existing_user:
-                    logger.warning(f'User {user.id} has stale remnawave_uuid {panel_uuid}, clearing')
+                    logger.warning('User has stale remnawave_uuid clearing', user_id=user.id, panel_uuid=panel_uuid)
                     panel_uuid = None
                     user.remnawave_uuid = None
 
@@ -299,7 +299,7 @@ async def _sync_subscription_to_panel(db: AsyncSession, user: User, subscription
                 try:
                     await api.update_user(**update_kwargs)
                     changes['action'] = 'updated'
-                    logger.info(f'Updated user {user.id} in Remnawave panel')
+                    logger.info('Updated user in Remnawave panel', user_id=user.id)
                 except Exception as update_error:
                     if hasattr(update_error, 'status_code') and update_error.status_code == 404:
                         panel_uuid = None  # Will create new
@@ -310,7 +310,7 @@ async def _sync_subscription_to_panel(db: AsyncSession, user: User, subscription
                 # Create new user
                 create_kwargs = {
                     'username': username,
-                    'expire_at': expire_at or (datetime.utcnow() + timedelta(days=30)),
+                    'expire_at': expire_at or (datetime.now(UTC) + timedelta(days=30)),
                     'status': panel_status,
                     'traffic_limit_bytes': traffic_limit_bytes,
                     'traffic_limit_strategy': TrafficLimitStrategy.MONTH,
@@ -328,15 +328,15 @@ async def _sync_subscription_to_panel(db: AsyncSession, user: User, subscription
                 subscription.subscription_url = new_panel_user.subscription_url
                 changes['action'] = 'created'
                 changes['panel_uuid'] = new_panel_user.uuid
-                logger.info(f'Created user {user.id} in Remnawave panel: {new_panel_user.uuid}')
+                logger.info('Created user in Remnawave panel', user_id=user.id, uuid=new_panel_user.uuid)
 
-            user.last_remnawave_sync = datetime.utcnow()
+            user.last_remnawave_sync = datetime.now(UTC)
             await db.commit()
 
         return changes
 
     except Exception as e:
-        logger.error(f'Error syncing user {user.id} to panel: {e}')
+        logger.error('Error syncing user to panel', user_id=user.id, error=e)
         return {'error': str(e)}
 
 
@@ -421,7 +421,7 @@ async def get_users_stats(
             func.cast(
                 and_(
                     Subscription.status == SubscriptionStatus.ACTIVE.value,
-                    Subscription.end_date > datetime.utcnow(),
+                    Subscription.end_date > datetime.now(UTC),
                 ),
                 Integer,
             )
@@ -431,7 +431,7 @@ async def get_users_stats(
             func.cast(
                 or_(
                     Subscription.status == SubscriptionStatus.EXPIRED.value,
-                    Subscription.end_date <= datetime.utcnow(),
+                    Subscription.end_date <= datetime.now(UTC),
                 ),
                 Integer,
             )
@@ -456,7 +456,7 @@ async def get_users_stats(
     avg_balance = int(balance_row.avg or 0) if balance_row else 0
 
     # Get activity stats
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = now - timedelta(days=7)
     month_ago = now - timedelta(days=30)
@@ -709,7 +709,7 @@ async def get_user_panel_info(
                             last_node_name = node.node_name
                             break
                 except Exception:
-                    logger.warning(f'Failed to resolve node name for user {user_id}')
+                    logger.warning('Failed to resolve node name for user', user_id=user_id)
 
             return UserPanelInfoResponse(
                 found=True,
@@ -728,7 +728,7 @@ async def get_user_panel_info(
             )
 
     except Exception as e:
-        logger.error(f'Error getting panel info for user {user_id}: {e}')
+        logger.error('Error getting panel info for user', user_id=user_id, error=e)
         return UserPanelInfoResponse(found=False)
 
 
@@ -756,7 +756,7 @@ async def get_user_node_usage(
         if not service.is_configured:
             return UserNodeUsageResponse(items=[])
 
-        end_date = datetime.utcnow()
+        end_date = datetime.now(UTC)
         start_date = end_date - timedelta(days=30)
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
@@ -812,7 +812,7 @@ async def get_user_node_usage(
             return UserNodeUsageResponse(items=items, categories=categories)
 
     except Exception as e:
-        logger.error(f'Error getting node usage for user {user_id}: {e}')
+        logger.error('Error getting node usage for user', user_id=user_id, error=e)
         return UserNodeUsageResponse(items=[])
 
 
@@ -877,8 +877,12 @@ async def update_user_balance(
     await db.refresh(user)
 
     logger.info(
-        f'Admin {admin.id} updated balance for user {user_id}: '
-        f'{old_balance} -> {user.balance_kopeks} ({request.amount_kopeks:+d})'
+        'Admin updated balance for user',
+        admin_id=admin.id,
+        user_id=user_id,
+        old_balance=old_balance,
+        balance_kopeks=user.balance_kopeks,
+        amount_kopeks=format(request.amount_kopeks, '+d'),
     )
 
     return UpdateBalanceResponse(
@@ -962,7 +966,7 @@ async def update_user_subscription(
         # Sync to Remnawave panel
         await _sync_subscription_to_panel(db, user, new_sub)
 
-        logger.info(f'Admin {admin.id} created subscription for user {user_id}')
+        logger.info('Admin created subscription for user', admin_id=admin.id, user_id=user_id)
 
         return UpdateSubscriptionResponse(
             success=True,
@@ -989,7 +993,9 @@ async def update_user_subscription(
         # Sync to Remnawave panel
         await _sync_subscription_to_panel(db, user, subscription)
 
-        logger.info(f'Admin {admin.id} extended subscription for user {user_id} by {request.days} days')
+        logger.info(
+            'Admin extended subscription for user by days', admin_id=admin.id, user_id=user_id, days=request.days
+        )
 
         return UpdateSubscriptionResponse(
             success=True,
@@ -1005,7 +1011,7 @@ async def update_user_subscription(
             )
 
         subscription.end_date = request.end_date
-        if request.end_date > datetime.utcnow():
+        if request.end_date > datetime.now(UTC):
             subscription.status = SubscriptionStatus.ACTIVE.value
         else:
             subscription.status = SubscriptionStatus.EXPIRED.value
@@ -1016,7 +1022,7 @@ async def update_user_subscription(
         # Sync to Remnawave panel
         await _sync_subscription_to_panel(db, user, subscription)
 
-        logger.info(f'Admin {admin.id} set end_date for user {user_id} subscription')
+        logger.info('Admin set end_date for user subscription', admin_id=admin.id, user_id=user_id)
 
         return UpdateSubscriptionResponse(
             success=True,
@@ -1050,7 +1056,7 @@ async def update_user_subscription(
         # Sync to Remnawave panel
         await _sync_subscription_to_panel(db, user, subscription)
 
-        logger.info(f'Admin {admin.id} changed tariff for user {user_id} to {tariff.name}')
+        logger.info('Admin changed tariff for user to', admin_id=admin.id, user_id=user_id, tariff_name=tariff.name)
 
         return UpdateSubscriptionResponse(
             success=True,
@@ -1071,7 +1077,7 @@ async def update_user_subscription(
         # Sync to Remnawave panel
         await _sync_subscription_to_panel(db, user, subscription)
 
-        logger.info(f'Admin {admin.id} updated traffic for user {user_id}')
+        logger.info('Admin updated traffic for user', admin_id=admin.id, user_id=user_id)
 
         return UpdateSubscriptionResponse(
             success=True,
@@ -1091,7 +1097,7 @@ async def update_user_subscription(
         await db.refresh(subscription)
 
         state = 'enabled' if request.autopay_enabled else 'disabled'
-        logger.info(f'Admin {admin.id} {state} autopay for user {user_id}')
+        logger.info('Admin autopay for user', admin_id=admin.id, state=state, user_id=user_id)
 
         return UpdateSubscriptionResponse(
             success=True,
@@ -1101,14 +1107,14 @@ async def update_user_subscription(
 
     if request.action == 'cancel':
         subscription.status = SubscriptionStatus.EXPIRED.value
-        subscription.end_date = datetime.utcnow()
+        subscription.end_date = datetime.now(UTC)
         await db.commit()
         await db.refresh(subscription)
 
         # Sync to Remnawave panel
         await _sync_subscription_to_panel(db, user, subscription)
 
-        logger.info(f'Admin {admin.id} cancelled subscription for user {user_id}')
+        logger.info('Admin cancelled subscription for user', admin_id=admin.id, user_id=user_id)
 
         return UpdateSubscriptionResponse(
             success=True,
@@ -1118,16 +1124,16 @@ async def update_user_subscription(
 
     if request.action == 'activate':
         subscription.status = SubscriptionStatus.ACTIVE.value
-        if subscription.end_date and subscription.end_date <= datetime.utcnow():
+        if subscription.end_date and subscription.end_date <= datetime.now(UTC):
             # Extend by 30 days if expired
-            subscription.end_date = datetime.utcnow() + timedelta(days=30)
+            subscription.end_date = datetime.now(UTC) + timedelta(days=30)
         await db.commit()
         await db.refresh(subscription)
 
         # Sync to Remnawave panel
         await _sync_subscription_to_panel(db, user, subscription)
 
-        logger.info(f'Admin {admin.id} activated subscription for user {user_id}')
+        logger.info('Admin activated subscription for user', admin_id=admin.id, user_id=user_id)
 
         return UpdateSubscriptionResponse(
             success=True,
@@ -1151,7 +1157,7 @@ async def update_user_subscription(
         # Sync to Remnawave panel
         await _sync_subscription_to_panel(db, user, subscription)
 
-        logger.info(f'Admin {admin.id} added {request.traffic_gb} GB traffic for user {user_id}')
+        logger.info('Admin added traffic for user', admin_id=admin.id, traffic_gb=request.traffic_gb, user_id=user_id)
 
         return UpdateSubscriptionResponse(
             success=True,
@@ -1190,7 +1196,7 @@ async def update_user_subscription(
         await db.delete(traffic_purchase)
 
         # Recalculate traffic_reset_at from remaining active purchases
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         remaining_query = select(TrafficPurchase).where(
             TrafficPurchase.subscription_id == subscription.id,
             TrafficPurchase.expires_at > now,
@@ -1211,7 +1217,11 @@ async def update_user_subscription(
         await _sync_subscription_to_panel(db, user, subscription)
 
         logger.info(
-            f'Admin {admin.id} removed traffic purchase {request.traffic_purchase_id} ({removed_gb} GB) for user {user_id}'
+            'Admin removed traffic purchase ( GB) for user',
+            admin_id=admin.id,
+            traffic_purchase_id=request.traffic_purchase_id,
+            removed_gb=removed_gb,
+            user_id=user_id,
         )
 
         return UpdateSubscriptionResponse(
@@ -1234,7 +1244,9 @@ async def update_user_subscription(
         # Sync to Remnawave panel
         await _sync_subscription_to_panel(db, user, subscription)
 
-        logger.info(f'Admin {admin.id} set device limit to {request.device_limit} for user {user_id}')
+        logger.info(
+            'Admin set device limit to for user', admin_id=admin.id, device_limit=request.device_limit, user_id=user_id
+        )
 
         return UpdateSubscriptionResponse(
             success=True,
@@ -1376,7 +1388,7 @@ async def update_user_status(
         )
 
     user.status = new_status
-    user.updated_at = datetime.utcnow()
+    user.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(user)
 
@@ -1384,7 +1396,7 @@ async def update_user_status(
     if request.reason:
         action += f' (reason: {request.reason})'
 
-    logger.info(f'Admin {admin.id} changed status for user {user_id}: {action}')
+    logger.info('Admin changed status for user', admin_id=admin.id, user_id=user_id, action=action)
 
     return UpdateUserStatusResponse(
         success=True,
@@ -1444,13 +1456,16 @@ async def update_user_restrictions(
     if request.restriction_reason is not None:
         user.restriction_reason = request.restriction_reason
 
-    user.updated_at = datetime.utcnow()
+    user.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(user)
 
     logger.info(
-        f'Admin {admin.id} updated restrictions for user {user_id}: '
-        f'topup={user.restriction_topup}, subscription={user.restriction_subscription}'
+        'Admin updated restrictions for user topup=, subscription',
+        admin_id=admin.id,
+        user_id=user_id,
+        restriction_topup=user.restriction_topup,
+        restriction_subscription=user.restriction_subscription,
     )
 
     return UpdateRestrictionsResponse(
@@ -1496,12 +1511,16 @@ async def update_user_promo_group(
         promo_group_name = promo_group.name
 
     user.promo_group_id = new_promo_group_id
-    user.updated_at = datetime.utcnow()
+    user.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(user)
 
     logger.info(
-        f'Admin {admin.id} changed promo group for user {user_id}: {old_promo_group_id} -> {new_promo_group_id}'
+        'Admin changed promo group for user',
+        admin_id=admin.id,
+        user_id=user_id,
+        old_promo_group_id=old_promo_group_id,
+        new_promo_group_id=new_promo_group_id,
     )
 
     return UpdatePromoGroupResponse(
@@ -1533,11 +1552,15 @@ async def update_user_referral_commission(
 
     old_commission = user.referral_commission_percent
     user.referral_commission_percent = request.commission_percent
-    user.updated_at = datetime.utcnow()
+    user.updated_at = datetime.now(UTC)
     await db.commit()
 
     logger.info(
-        f'Admin {admin.id} changed referral commission for user {user_id}: {old_commission} -> {request.commission_percent}'
+        'Admin changed referral commission for user',
+        admin_id=admin.id,
+        user_id=user_id,
+        old_commission=old_commission,
+        commission_percent=request.commission_percent,
     )
 
     return UpdateReferralCommissionResponse(
@@ -1600,7 +1623,7 @@ async def get_user_devices(
             )
 
     except Exception as e:
-        logger.error(f'Error fetching devices for user {user_id}: {e}')
+        logger.error('Error fetching devices for user', user_id=user_id, error=e)
         return UserDevicesResponse()
 
 
@@ -1627,12 +1650,12 @@ async def delete_user_device(
             success = await api.remove_device(user.remnawave_uuid, hwid)
 
         if success:
-            logger.info(f'Admin {admin.id} deleted device {hwid} for user {user_id}')
+            logger.info('Admin deleted device for user', admin_id=admin.id, hwid=hwid, user_id=user_id)
             return DeleteDeviceResponse(success=True, message='Device deleted', deleted_hwid=hwid)
         return DeleteDeviceResponse(success=False, message='Failed to delete device')
 
     except Exception as e:
-        logger.error(f'Error deleting device {hwid} for user {user_id}: {e}')
+        logger.error('Error deleting device for user', hwid=hwid, user_id=user_id, error=e)
         return DeleteDeviceResponse(success=False, message=str(e))
 
 
@@ -1672,11 +1695,11 @@ async def reset_user_devices(
                     except Exception:
                         pass
 
-        logger.info(f'Admin {admin.id} reset devices for user {user_id}: {deleted}/{total}')
+        logger.info('Admin reset devices for user /', admin_id=admin.id, user_id=user_id, deleted=deleted, total=total)
         return ResetDevicesResponse(success=True, message=f'Deleted {deleted}/{total} devices', deleted_count=deleted)
 
     except Exception as e:
-        logger.error(f'Error resetting devices for user {user_id}: {e}')
+        logger.error('Error resetting devices for user', user_id=user_id, error=e)
         return ResetDevicesResponse(success=False, message=str(e))
 
 
@@ -1713,7 +1736,7 @@ async def delete_user(
         action = 'permanently deleted'
 
     reason_text = f' (reason: {request.reason})' if request.reason else ''
-    logger.info(f'Admin {admin.id} {action} user {user_id}{reason_text}')
+    logger.info('Admin user', admin_id=admin.id, action=action, user_id=user_id, reason_text=reason_text)
 
     return DeleteUserResponse(
         success=True,
@@ -1756,7 +1779,7 @@ async def full_delete_user(
         deleted_from_panel = request.delete_from_panel and user.remnawave_uuid is not None
 
     reason_text = f' (reason: {request.reason})' if request.reason else ''
-    logger.info(f'Admin {admin.id} fully deleted user {user_id}{reason_text}')
+    logger.info('Admin fully deleted user', admin_id=admin.id, user_id=user_id, reason_text=reason_text)
 
     return FullDeleteUserResponse(
         success=success,
@@ -1800,9 +1823,9 @@ async def reset_user_trial(
 
                 subscription_service = SubscriptionService()
                 await subscription_service.disable_remnawave_user(user.remnawave_uuid)
-                logger.info(f'Disabled Remnawave user {user.remnawave_uuid} for trial reset')
+                logger.info('Disabled Remnawave user for trial reset', remnawave_uuid=user.remnawave_uuid)
             except Exception as e:
-                logger.warning(f'Failed to disable Remnawave user during trial reset: {e}')
+                logger.warning('Failed to disable Remnawave user during trial reset', error=e)
 
         # Delete subscription from database
         from sqlalchemy import delete
@@ -1814,12 +1837,12 @@ async def reset_user_trial(
 
     # Reset trial flag
     user.has_used_trial = False
-    user.updated_at = datetime.utcnow()
+    user.updated_at = datetime.now(UTC)
 
     await db.commit()
 
     reason_text = f' (reason: {request.reason})' if request.reason else ''
-    logger.info(f'Admin {admin.id} reset trial for user {user_id}{reason_text}')
+    logger.info('Admin reset trial for user', admin_id=admin.id, user_id=user_id, reason_text=reason_text)
 
     return ResetTrialResponse(
         success=True,
@@ -1871,10 +1894,10 @@ async def reset_user_subscription(
             subscription_service = SubscriptionService()
             panel_deactivated = await subscription_service.disable_remnawave_user(user.remnawave_uuid)
             if panel_deactivated:
-                logger.info(f'Disabled Remnawave user {user.remnawave_uuid} for subscription reset')
+                logger.info('Disabled Remnawave user for subscription reset', remnawave_uuid=user.remnawave_uuid)
         except Exception as e:
             panel_error = str(e)
-            logger.warning(f'Failed to disable Remnawave user during subscription reset: {e}')
+            logger.warning('Failed to disable Remnawave user during subscription reset', error=e)
 
     # Delete subscription from database
     from sqlalchemy import delete
@@ -1884,11 +1907,11 @@ async def reset_user_subscription(
     await db.execute(delete(Subscription).where(Subscription.user_id == user_id))
     subscription_deleted = True
 
-    user.updated_at = datetime.utcnow()
+    user.updated_at = datetime.now(UTC)
     await db.commit()
 
     reason_text = f' (reason: {request.reason})' if request.reason else ''
-    logger.info(f'Admin {admin.id} reset subscription for user {user_id}{reason_text}')
+    logger.info('Admin reset subscription for user', admin_id=admin.id, user_id=user_id, reason_text=reason_text)
 
     return ResetSubscriptionResponse(
         success=True,
@@ -1933,10 +1956,10 @@ async def disable_user(
             subscription_service = SubscriptionService()
             panel_deactivated = await subscription_service.disable_remnawave_user(user.remnawave_uuid)
             if panel_deactivated:
-                logger.info(f'Disabled Remnawave user {user.remnawave_uuid}')
+                logger.info('Disabled Remnawave user', remnawave_uuid=user.remnawave_uuid)
         except Exception as e:
             panel_error = str(e)
-            logger.warning(f'Failed to disable Remnawave user: {e}')
+            logger.warning('Failed to disable Remnawave user', error=e)
 
     # Deactivate subscription in bot database
     if user.subscription:
@@ -1944,15 +1967,15 @@ async def disable_user(
 
         await deactivate_subscription(db, user.subscription)
         subscription_deactivated = True
-        logger.info(f'Deactivated subscription for user {user_id}')
+        logger.info('Deactivated subscription for user', user_id=user_id)
 
     # Block user account
     user.status = UserStatus.BLOCKED.value
-    user.updated_at = datetime.utcnow()
+    user.updated_at = datetime.now(UTC)
     await db.commit()
 
     reason_text = f' (reason: {request.reason})' if request.reason else ''
-    logger.info(f'Admin {admin.id} disabled user {user_id}{reason_text}')
+    logger.info('Admin disabled user', admin_id=admin.id, user_id=user_id, reason_text=reason_text)
 
     return DisableUserResponse(
         success=True,
@@ -2156,13 +2179,8 @@ async def get_user_sync_status(
                             differences.append(f'Status: bot={bot_sub_status}, panel={panel_status}')
 
                     if bot_sub_end_date and panel_expire_at:
-                        # Convert both to naive UTC for comparison
-                        # Bot dates are stored as naive UTC
-                        bot_end_utc = (
-                            bot_sub_end_date.replace(tzinfo=None) if bot_sub_end_date.tzinfo else bot_sub_end_date
-                        )
-                        # Panel returns local time with misleading +00:00 offset
-                        panel_end_utc = panel_datetime_to_naive_utc(panel_expire_at)
+                        bot_end_utc = bot_sub_end_date if bot_sub_end_date.tzinfo else bot_sub_end_date
+                        panel_end_utc = panel_datetime_to_utc(panel_expire_at)
 
                         diff_seconds = abs((bot_end_utc - panel_end_utc).total_seconds())
                         # Allow for timezone offset (3 hours = MSK) and small sync delays
@@ -2199,7 +2217,7 @@ async def get_user_sync_status(
                         differences.append(f'Squads mismatch ({", ".join(squad_diff_parts)})')
 
     except Exception as e:
-        logger.warning(f'Failed to get panel data for user {user_id}: {e}')
+        logger.warning('Failed to get panel data for user', user_id=user_id, error=e)
         differences.append(f'Error fetching panel data: {e!s}')
 
     return PanelSyncStatusResponse(
@@ -2296,7 +2314,7 @@ async def sync_user_from_panel(
                 short_uuid=panel_user.short_uuid,
                 username=panel_user.username,
                 status=panel_user.status.value if panel_user.status else None,
-                expire_at=panel_datetime_to_naive_utc(panel_user.expire_at) if panel_user.expire_at else None,
+                expire_at=panel_datetime_to_utc(panel_user.expire_at) if panel_user.expire_at else None,
                 traffic_limit_gb=panel_user.traffic_limit_bytes / (1024**3) if panel_user.traffic_limit_bytes else 0,
                 traffic_used_gb=panel_user.used_traffic_bytes / (1024**3) if panel_user.used_traffic_bytes else 0,
                 device_limit=panel_user.hwid_device_limit or 1,
@@ -2315,13 +2333,10 @@ async def sync_user_from_panel(
 
                 # Update end date (normalize timezone)
                 if panel_user.expire_at:
-                    # Panel returns local time with misleading +00:00 offset
-                    panel_expire_utc = panel_datetime_to_naive_utc(panel_user.expire_at)
+                    panel_expire_utc = panel_datetime_to_utc(panel_user.expire_at)
 
-                    sub_end_naive = (
-                        sub.end_date.replace(tzinfo=None) if sub.end_date and sub.end_date.tzinfo else sub.end_date
-                    )
-                    if sub_end_naive != panel_expire_utc:
+                    sub_end_utc = sub.end_date if sub.end_date and sub.end_date.tzinfo else sub.end_date
+                    if sub_end_utc != panel_expire_utc:
                         changes['end_date'] = {
                             'old': sub.end_date.isoformat() if sub.end_date else None,
                             'new': panel_expire_utc.isoformat(),
@@ -2330,7 +2345,7 @@ async def sync_user_from_panel(
 
                 # Update status
                 panel_status_str = panel_user.status.value if panel_user.status else 'DISABLED'
-                now = datetime.utcnow()
+                now = datetime.now(UTC)
                 # Compare with normalized panel expire date
                 panel_expire_for_check = panel_expire_utc if panel_user.expire_at else None
                 if panel_status_str == 'ACTIVE' and panel_expire_for_check and panel_expire_for_check > now:
@@ -2387,9 +2402,8 @@ async def sync_user_from_panel(
                 panel_traffic_limit = (
                     int(panel_user.traffic_limit_bytes / (1024**3)) if panel_user.traffic_limit_bytes else 100
                 )
-                # Panel returns local time with misleading +00:00 offset
-                panel_expire_naive = panel_datetime_to_naive_utc(panel_user.expire_at)
-                days_remaining = max(1, (panel_expire_naive - datetime.utcnow()).days)
+                panel_expire_utc = panel_datetime_to_utc(panel_user.expire_at)
+                days_remaining = max(1, (panel_expire_utc - datetime.now(UTC)).days)
 
                 new_sub = await create_paid_subscription(
                     db=db,
@@ -2404,12 +2418,14 @@ async def sync_user_from_panel(
                 changes['subscription_created'] = True
 
             # Update last sync time
-            user.last_remnawave_sync = datetime.utcnow()
-            user.updated_at = datetime.utcnow()
+            user.last_remnawave_sync = datetime.now(UTC)
+            user.updated_at = datetime.now(UTC)
 
             await db.commit()
 
-        logger.info(f'Admin {admin.id} synced user {user_id} from panel. Changes: {list(changes.keys())}')
+        logger.info(
+            'Admin synced user from panel. Changes', admin_id=admin.id, user_id=user_id, value=list(changes.keys())
+        )
 
         return SyncFromPanelResponse(
             success=True,
@@ -2422,7 +2438,7 @@ async def sync_user_from_panel(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f'Error syncing user {user_id} from panel: {e}')
+        logger.error('Error syncing user from panel', user_id=user_id, error=e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f'Sync error: {e!s}',
@@ -2477,14 +2493,14 @@ async def sync_user_to_panel(
         is_active = (
             sub.status in (SubscriptionStatus.ACTIVE.value, SubscriptionStatus.TRIAL.value)
             and sub.end_date
-            and sub.end_date > datetime.utcnow()
+            and sub.end_date > datetime.now(UTC)
         )
         panel_status = PanelUserStatus.ACTIVE if is_active else PanelUserStatus.DISABLED
 
         # Ensure expire_at is in future for panel
         expire_at = sub.end_date
-        if expire_at and expire_at <= datetime.utcnow():
-            expire_at = datetime.utcnow() + timedelta(minutes=1)
+        if expire_at and expire_at <= datetime.now(UTC):
+            expire_at = datetime.now(UTC) + timedelta(minutes=1)
 
         username = settings.format_remnawave_username(
             full_name=user.full_name,
@@ -2510,7 +2526,7 @@ async def sync_user_to_panel(
             if panel_uuid:
                 existing_user = await api.get_user_by_uuid(panel_uuid)
                 if not existing_user:
-                    logger.warning(f'User {user.id} has stale remnawave_uuid {panel_uuid}, clearing')
+                    logger.warning('User has stale remnawave_uuid clearing', user_id=user.id, panel_uuid=panel_uuid)
                     panel_uuid = None
                     user.remnawave_uuid = None
 
@@ -2570,7 +2586,7 @@ async def sync_user_to_panel(
                 # Create new user in panel
                 create_kwargs = {
                     'username': username,
-                    'expire_at': expire_at or (datetime.utcnow() + timedelta(days=30)),
+                    'expire_at': expire_at or (datetime.now(UTC) + timedelta(days=30)),
                     'status': panel_status,
                     'traffic_limit_bytes': traffic_limit_bytes,
                     'traffic_limit_strategy': TrafficLimitStrategy.MONTH,
@@ -2595,12 +2611,12 @@ async def sync_user_to_panel(
                 action = 'created'
 
             # Update last sync time
-            user.last_remnawave_sync = datetime.utcnow()
-            user.updated_at = datetime.utcnow()
+            user.last_remnawave_sync = datetime.now(UTC)
+            user.updated_at = datetime.now(UTC)
 
             await db.commit()
 
-        logger.info(f'Admin {admin.id} synced user {user_id} to panel. Action: {action}')
+        logger.info('Admin synced user to panel. Action', admin_id=admin.id, user_id=user_id, action=action)
 
         return SyncToPanelResponse(
             success=True,
@@ -2614,7 +2630,7 @@ async def sync_user_to_panel(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f'Error syncing user {user_id} to panel: {e}')
+        logger.error('Error syncing user to panel', user_id=user_id, error=e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f'Sync error: {e!s}',

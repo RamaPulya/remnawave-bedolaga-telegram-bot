@@ -1,8 +1,9 @@
 import asyncio
-import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
+
+import structlog
 
 from app.config import settings
 from app.external.remnawave_api import RemnaWaveAPI, test_api_connection
@@ -10,7 +11,7 @@ from app.utils.cache import cache
 from app.utils.timezone import format_local_datetime
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -75,13 +76,13 @@ class MaintenanceService:
             emoji_map = {'error': '🚨', 'warning': '⚠️', 'success': '✅', 'info': 'ℹ️'}
             emoji = emoji_map.get(alert_type, 'ℹ️')
 
-            timestamp = format_local_datetime(datetime.utcnow(), '%d.%m.%Y %H:%M:%S %Z')
+            timestamp = format_local_datetime(datetime.now(UTC), '%d.%m.%Y %H:%M:%S %Z')
             formatted_message = f'{emoji} <b>ТЕХНИЧЕСКИЕ РАБОТЫ</b>\n\n{message}\n\n⏰ <i>{timestamp}</i>'
 
             return await notification_service._send_message(formatted_message)
 
         except Exception as e:
-            logger.error(f'Ошибка отправки уведомления через AdminNotificationService: {e}')
+            logger.error('Ошибка отправки уведомления через AdminNotificationService', error=e)
             return False
 
     async def _notify_admins(self, message: str, alert_type: str = 'info'):
@@ -119,10 +120,10 @@ class MaintenanceService:
                 await asyncio.sleep(0.1)
 
             except Exception as e:
-                logger.error(f'Ошибка отправки уведомления админу {admin_id}: {e}')
+                logger.error('Ошибка отправки уведомления админу', admin_id=admin_id, error=e)
 
         if success_count > 0:
-            logger.info(f'Уведомление отправлено {success_count} администраторам')
+            logger.info('Уведомление отправлено администраторам', success_count=success_count)
             await cache.set(cache_key, True, expire=300)
         else:
             logger.error('Не удалось отправить уведомления ни одному администратору')
@@ -134,7 +135,7 @@ class MaintenanceService:
                 return True
 
             self._status.is_active = True
-            self._status.enabled_at = datetime.utcnow()
+            self._status.enabled_at = datetime.now(UTC)
             self._status.reason = reason or ('Автоматическое включение' if auto else 'Включено администратором')
             self._status.auto_enabled = auto
 
@@ -151,11 +152,11 @@ class MaintenanceService:
 
             await self._notify_admins(notification_msg, 'warning' if auto else 'info')
 
-            logger.warning(f'🔧 Режим техработ ВКЛЮЧЕН. Причина: {self._status.reason}')
+            logger.warning('🔧 Режим техработ ВКЛЮЧЕН. Причина', reason=self._status.reason)
             return True
 
         except Exception as e:
-            logger.error(f'Ошибка включения режима техработ: {e}')
+            logger.error('Ошибка включения режима техработ', error=e)
             return False
 
     async def disable_maintenance(self) -> bool:
@@ -167,7 +168,7 @@ class MaintenanceService:
             was_auto = self._status.auto_enabled
             duration = None
             if self._status.enabled_at:
-                duration = datetime.utcnow() - self._status.enabled_at
+                duration = datetime.now(UTC) - self._status.enabled_at
 
             self._status.is_active = False
             self._status.enabled_at = None
@@ -186,7 +187,7 @@ class MaintenanceService:
                 else:
                     duration_str = f'\n⏱️ <b>Длительность:</b> {minutes}мин'
 
-            notification_time = format_local_datetime(datetime.utcnow(), '%d.%m.%Y %H:%M:%S %Z')
+            notification_time = format_local_datetime(datetime.now(UTC), '%d.%m.%Y %H:%M:%S %Z')
             notification_msg = f"""Режим технических работ ВЫКЛЮЧЕН
 
 🤖 <b>Автоматически:</b> {'Да' if was_auto else 'Нет'}
@@ -201,7 +202,7 @@ class MaintenanceService:
             return True
 
         except Exception as e:
-            logger.error(f'Ошибка выключения режима техработ: {e}')
+            logger.error('Ошибка выключения режима техработ', error=e)
             return False
 
     async def start_monitoring(self) -> bool:
@@ -214,9 +215,9 @@ class MaintenanceService:
 
             self._check_task = asyncio.create_task(self._monitoring_loop())
             logger.info(
-                '🔄 Запущен мониторинг API Remnawave (интервал: %sс, попыток: %s)',
-                settings.get_maintenance_check_interval(),
-                settings.get_maintenance_retry_attempts(),
+                '🔄 Запущен мониторинг API Remnawave (интервал: с, попыток:)',
+                get_maintenance_check_interval=settings.get_maintenance_check_interval(),
+                get_maintenance_retry_attempts=settings.get_maintenance_retry_attempts(),
             )
 
             # Сообщение о запуске мониторинга убрано - теперь используется
@@ -225,7 +226,7 @@ class MaintenanceService:
             return True
 
         except Exception as e:
-            logger.error(f'Ошибка запуска мониторинга: {e}')
+            logger.error('Ошибка запуска мониторинга', error=e)
             return False
 
     async def stop_monitoring(self) -> bool:
@@ -242,7 +243,7 @@ class MaintenanceService:
             return True
 
         except Exception as e:
-            logger.error(f'Ошибка остановки мониторинга: {e}')
+            logger.error('Ошибка остановки мониторинга', error=e)
             return False
 
     async def check_api_status(self) -> bool:
@@ -251,7 +252,7 @@ class MaintenanceService:
                 return self._status.api_status
 
             self._is_checking = True
-            self._status.last_check = datetime.utcnow()
+            self._status.last_check = datetime.now(UTC)
 
             auth_params = settings.get_remnawave_auth_params()
             base_url = (auth_params.get('base_url') or '').strip()
@@ -292,7 +293,7 @@ class MaintenanceService:
 
                     if is_connected:
                         if attempt > 1:
-                            logger.info('API Remnawave ответило с %s попытки', attempt)
+                            logger.info('API Remnawave ответило с попытки', attempt=attempt)
 
                         if not self._status.api_status:
                             recovery_time = format_local_datetime(self._status.last_check, '%H:%M:%S %Z')
@@ -317,11 +318,7 @@ API снова отвечает на запросы.""",
                         return True
 
                     if attempt < attempts:
-                        logger.warning(
-                            'API Remnawave недоступно (попытка %s/%s)',
-                            attempt,
-                            attempts,
-                        )
+                        logger.warning('API Remnawave недоступно (попытка /)', attempt=attempt, attempts=attempts)
                         await asyncio.sleep(1)
 
                 was_available = self._status.api_status
@@ -356,10 +353,10 @@ API снова отвечает на запросы.""",
                 return False
 
         except Exception as e:
-            logger.error(f'Ошибка проверки API: {e}')
+            logger.error('Ошибка проверки API', error=e)
 
             if self._status.api_status:
-                error_time = format_local_datetime(datetime.utcnow(), '%H:%M:%S %Z')
+                error_time = format_local_datetime(datetime.now(UTC), '%H:%M:%S %Z')
                 await self._notify_admins(
                     f"""Ошибка при проверке API Remnawave
 
@@ -387,7 +384,7 @@ API снова отвечает на запросы.""",
                 logger.info('Мониторинг отменен')
                 break
             except Exception as e:
-                logger.error(f'Ошибка в цикле мониторинга: {e}')
+                logger.error('Ошибка в цикле мониторинга', error=e)
                 await asyncio.sleep(30)
 
     async def _save_status_to_cache(self):
@@ -404,7 +401,7 @@ API снова отвечает на запросы.""",
             await cache.set('maintenance_status', status_data, expire=3600)
 
         except Exception as e:
-            logger.error(f'Ошибка сохранения состояния в кеш: {e}')
+            logger.error('Ошибка сохранения состояния в кеш', error=e)
 
     async def _load_status_from_cache(self):
         try:
@@ -418,15 +415,21 @@ API снова отвечает на запросы.""",
             self._status.consecutive_failures = status_data.get('consecutive_failures', 0)
 
             if status_data.get('enabled_at'):
-                self._status.enabled_at = datetime.fromisoformat(status_data['enabled_at'])
+                dt = datetime.fromisoformat(status_data['enabled_at'])
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                self._status.enabled_at = dt
 
             if status_data.get('last_check'):
-                self._status.last_check = datetime.fromisoformat(status_data['last_check'])
+                dt = datetime.fromisoformat(status_data['last_check'])
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                self._status.last_check = dt
 
-            logger.info(f'🔥 Состояние техработ загружено из кеша: активен={self._status.is_active}')
+            logger.info('🔥 Состояние техработ загружено из кеша: активен', is_active=self._status.is_active)
 
         except Exception as e:
-            logger.error(f'Ошибка загрузки состояния из кеша: {e}')
+            logger.error('Ошибка загрузки состояния из кеша', error=e)
 
     def get_status_info(self) -> dict[str, Any]:
         return {
@@ -445,11 +448,11 @@ API снова отвечает на запросы.""",
         }
 
     async def force_api_check(self) -> dict[str, Any]:
-        start_time = datetime.utcnow()
+        start_time = datetime.now(UTC)
 
         try:
             api_status = await self.check_api_status()
-            end_time = datetime.utcnow()
+            end_time = datetime.now(UTC)
             response_time = (end_time - start_time).total_seconds()
 
             return {
@@ -461,7 +464,7 @@ API снова отвечает на запросы.""",
             }
 
         except Exception as e:
-            end_time = datetime.utcnow()
+            end_time = datetime.now(UTC)
             response_time = (end_time - start_time).total_seconds()
 
             return {
@@ -488,11 +491,11 @@ API снова отвечает на запросы.""",
             alert_type = 'error' if status in ['offline', 'error'] else 'info'
             await self._notify_admins(message, alert_type)
 
-            logger.info(f'Отправлено уведомление о статусе Remnawave: {status}')
+            logger.info('Отправлено уведомление о статусе Remnawave', status=status)
             return True
 
         except Exception as e:
-            logger.error(f'Ошибка отправки уведомления о статусе Remnawave: {e}')
+            logger.error('Ошибка отправки уведомления о статусе Remnawave', error=e)
             return False
 
 

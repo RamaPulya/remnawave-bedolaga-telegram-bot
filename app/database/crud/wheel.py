@@ -2,10 +2,10 @@
 CRUD операции для колеса удачи (Fortune Wheel).
 """
 
-import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -17,7 +17,7 @@ from app.database.models import (
 )
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 # ==================== WHEEL CONFIG ====================
@@ -65,10 +65,10 @@ async def update_wheel_config(db: AsyncSession, **kwargs) -> WheelConfig:
         if hasattr(config, key) and value is not None:
             setattr(config, key, value)
 
-    config.updated_at = datetime.utcnow()
+    config.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(config)
-    logger.info(f'🎡 Обновлена конфигурация колеса: {kwargs}')
+    logger.info('🎡 Обновлена конфигурация колеса', kwargs=kwargs)
     return config
 
 
@@ -129,7 +129,7 @@ async def create_wheel_prize(
     db.add(prize)
     await db.commit()
     await db.refresh(prize)
-    logger.info(f'🎁 Создан приз колеса: {display_name} ({prize_type})')
+    logger.info('🎁 Создан приз колеса', display_name=display_name, prize_type=prize_type)
     return prize
 
 
@@ -143,10 +143,10 @@ async def update_wheel_prize(db: AsyncSession, prize_id: int, **kwargs) -> Wheel
         if hasattr(prize, key) and value is not None:
             setattr(prize, key, value)
 
-    prize.updated_at = datetime.utcnow()
+    prize.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(prize)
-    logger.info(f'🎁 Обновлен приз колеса ID={prize_id}: {kwargs}')
+    logger.info('🎁 Обновлен приз колеса ID', prize_id=prize_id, kwargs=kwargs)
     return prize
 
 
@@ -158,7 +158,7 @@ async def delete_wheel_prize(db: AsyncSession, prize_id: int) -> bool:
 
     await db.delete(prize)
     await db.commit()
-    logger.info(f'🗑️ Удален приз колеса ID={prize_id}')
+    logger.info('🗑️ Удален приз колеса ID', prize_id=prize_id)
     return True
 
 
@@ -170,7 +170,7 @@ async def reorder_wheel_prizes(db: AsyncSession, prize_ids: list[int]) -> bool:
             prize.sort_order = index
 
     await db.commit()
-    logger.info(f'🔄 Переупорядочены призы колеса: {prize_ids}')
+    logger.info('🔄 Переупорядочены призы колеса', prize_ids=prize_ids)
     return True
 
 
@@ -204,12 +204,12 @@ async def create_wheel_spin(
         prize_value_kopeks=prize_value_kopeks,
         generated_promocode_id=generated_promocode_id,
         is_applied=is_applied,
-        applied_at=datetime.utcnow() if is_applied else None,
+        applied_at=datetime.now(UTC) if is_applied else None,
     )
     db.add(spin)
     await db.commit()
     await db.refresh(spin)
-    logger.info(f"🎰 Создан спин колеса: user_id={user_id}, prize='{prize_display_name}'")
+    logger.info('🎰 Создан спин колеса: user_id=, prize', user_id=user_id, prize_display_name=prize_display_name)
     return spin
 
 
@@ -219,7 +219,7 @@ async def mark_spin_applied(db: AsyncSession, spin_id: int) -> WheelSpin | None:
     spin = result.scalar_one_or_none()
     if spin:
         spin.is_applied = True
-        spin.applied_at = datetime.utcnow()
+        spin.applied_at = datetime.now(UTC)
         await db.commit()
         await db.refresh(spin)
     return spin
@@ -227,7 +227,7 @@ async def mark_spin_applied(db: AsyncSession, spin_id: int) -> WheelSpin | None:
 
 async def get_user_spins_today(db: AsyncSession, user_id: int) -> int:
     """Получить количество спинов пользователя за сегодня."""
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
 
     result = await db.execute(
         select(func.count(WheelSpin.id)).where(

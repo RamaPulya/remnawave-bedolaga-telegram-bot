@@ -9,14 +9,15 @@ Admin events (node, service, crm) send alerts to the admin notification chat.
 from __future__ import annotations
 
 import html
-import logging
 import re
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import delete
+from sqlalchemy.exc import PendingRollbackError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -29,7 +30,7 @@ from app.database.crud.subscription import (
     reactivate_subscription,
     update_subscription_usage,
 )
-from app.database.crud.user import get_user_by_remnawave_uuid, get_user_by_telegram_id
+from app.database.crud.user import get_user_by_id, get_user_by_remnawave_uuid, get_user_by_telegram_id
 from app.database.models import Subscription, SubscriptionServer, SubscriptionStatus, User
 from app.localization.texts import get_texts
 from app.services.admin_notification_service import AdminNotificationService
@@ -37,7 +38,7 @@ from app.services.notification_delivery_service import NotificationType, notific
 from app.utils.miniapp_buttons import build_miniapp_or_callback_button
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 # Mapping from locale text_key to NotificationType for unified delivery
@@ -169,11 +170,11 @@ class RemnaWaveWebhookService:
         user_handler = self._user_handlers.get(event_name)
         if user_handler:
             if db is None:
-                logger.error('RemnaWave webhook: DB session required for user event %s', event_name)
+                logger.error('RemnaWave webhook: DB session required for user event', event_name=event_name)
                 return False
             return await self._process_user_event(db, event_name, data, user_handler)
 
-        logger.debug('Unhandled RemnaWave webhook event: %s', event_name)
+        logger.debug('Unhandled RemnaWave webhook event', event_name=event_name)
         return False
 
     async def _process_user_event(self, db: AsyncSession, event_name: str, data: dict, handler: Any) -> bool:
@@ -181,10 +182,10 @@ class RemnaWaveWebhookService:
         user, subscription = await self._resolve_user_and_subscription(db, data)
         if not user:
             logger.warning(
-                'RemnaWave webhook: user not found for event %s, data telegramId=%s uuid=%s',
-                event_name,
-                data.get('telegramId'),
-                data.get('uuid'),
+                'RemnaWave webhook: user not found for event , data telegramId= uuid',
+                event_name=event_name,
+                data=data.get('telegramId'),
+                data_2=data.get('uuid'),
             )
             return False
 
@@ -192,11 +193,11 @@ class RemnaWaveWebhookService:
         try:
             await handler(db, user, subscription, data)
             return True
-        except StaleDataError:
+        except (StaleDataError, PendingRollbackError):
             logger.warning(
-                'RemnaWave webhook %s: entity already deleted for user %s (concurrent deletion)',
-                event_name,
-                user_id,
+                'RemnaWave webhook : entity already deleted for user (concurrent deletion)',
+                event_name=event_name,
+                user_id=user_id,
             )
             try:
                 await db.rollback()
@@ -204,7 +205,9 @@ class RemnaWaveWebhookService:
                 pass
             return True
         except Exception:
-            logger.exception('Error processing RemnaWave webhook event %s for user %s', event_name, user_id)
+            logger.exception(
+                'Error processing RemnaWave webhook event for user', event_name=event_name, user_id=user_id
+            )
             try:
                 await db.rollback()
             except Exception:
@@ -214,7 +217,7 @@ class RemnaWaveWebhookService:
     async def _process_admin_event(self, event_name: str, data: dict) -> bool:
         """Format and send admin notification for infrastructure events."""
         if not self._admin_service.is_enabled:
-            logger.debug('Admin notifications disabled, skipping event %s', event_name)
+            logger.debug('Admin notifications disabled, skipping event', event_name=event_name)
             return True
 
         title = self._admin_handlers.get(event_name, event_name)
@@ -271,7 +274,7 @@ class RemnaWaveWebhookService:
             await self._admin_service.send_webhook_notification('\n'.join(lines))
             return True
         except Exception:
-            logger.exception('Failed to send admin notification for event %s', event_name)
+            logger.exception('Failed to send admin notification for event', event_name=event_name)
             return False
 
     # ------------------------------------------------------------------
@@ -355,7 +358,7 @@ class RemnaWaveWebhookService:
         button_text = texts.get('MY_SUBSCRIPTION_BUTTON', 'My subscription')
         return InlineKeyboardMarkup(
             inline_keyboard=[
-                [build_miniapp_or_callback_button(text=button_text, callback_data='subscription')],
+                [build_miniapp_or_callback_button(text=button_text, callback_data='menu_subscription')],
             ]
         )
 
@@ -375,7 +378,7 @@ class RemnaWaveWebhookService:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [build_miniapp_or_callback_button(text=buy_text, callback_data='buy_traffic')],
-                [build_miniapp_or_callback_button(text=sub_text, callback_data='subscription')],
+                [build_miniapp_or_callback_button(text=sub_text, callback_data='menu_subscription')],
             ]
         )
 
@@ -397,25 +400,25 @@ class RemnaWaveWebhookService:
         per-event toggles from Settings.
         """
         if not settings.WEBHOOK_NOTIFY_USER_ENABLED:
-            logger.debug('Webhook user notifications disabled globally, skipping %s', text_key)
+            logger.debug('Webhook user notifications disabled globally, skipping', text_key=text_key)
             return
 
         setting_key = _TEXT_KEY_TO_SETTING.get(text_key)
         if setting_key and not getattr(settings, setting_key, True):
-            logger.debug('Webhook notification %s disabled via %s', text_key, setting_key)
+            logger.debug('Webhook notification disabled via', text_key=text_key, setting_key=setting_key)
             return
 
         texts = get_texts(user.language)
         message = texts.get(text_key)
         if not message:
-            logger.warning('Missing locale key %s for language %s', text_key, user.language)
+            logger.warning('Missing locale key for language', text_key=text_key, language=user.language)
             return
 
         if format_kwargs:
             try:
                 message = message.format(**format_kwargs)
             except (KeyError, IndexError):
-                logger.warning('Failed to format message %s with kwargs %s', text_key, format_kwargs)
+                logger.warning('Failed to format message with kwargs', text_key=text_key, format_kwargs=format_kwargs)
                 return
 
         # Append "Close" button to every webhook notification keyboard
@@ -430,7 +433,7 @@ class RemnaWaveWebhookService:
 
         notification_type = _TEXT_KEY_TO_NOTIFICATION_TYPE.get(text_key)
         if not notification_type:
-            logger.warning('No NotificationType mapping for text_key %s', text_key)
+            logger.warning('No NotificationType mapping for text_key', text_key=text_key)
             return
 
         context = {'text_key': text_key, **(format_kwargs or {})}
@@ -445,7 +448,7 @@ class RemnaWaveWebhookService:
                 telegram_markup=reply_markup,
             )
         except Exception:
-            logger.exception('Notification delivery failed for user %s, text_key %s', user.id, text_key)
+            logger.exception('Notification delivery failed for user , text_key', user_id=user.id, text_key=text_key)
 
     # ------------------------------------------------------------------
     # Webhook timestamp helper
@@ -454,7 +457,7 @@ class RemnaWaveWebhookService:
     @staticmethod
     def _stamp_webhook_update(subscription: Subscription) -> None:
         """Mark subscription as recently updated by webhook to prevent sync overwrite."""
-        subscription.last_webhook_update_at = datetime.now(UTC).replace(tzinfo=None)
+        subscription.last_webhook_update_at = datetime.now(UTC)
 
     # ------------------------------------------------------------------
     # User event handlers
@@ -467,7 +470,7 @@ class RemnaWaveWebhookService:
             self._stamp_webhook_update(subscription)
             if subscription.status != SubscriptionStatus.EXPIRED.value:
                 await expire_subscription(db, subscription)
-                logger.info('Webhook: subscription %s expired for user %s', subscription.id, user.id)
+                logger.info('Webhook: subscription expired for user', subscription_id=subscription.id, user_id=user.id)
             else:
                 await db.commit()
 
@@ -480,7 +483,7 @@ class RemnaWaveWebhookService:
             self._stamp_webhook_update(subscription)
             if subscription.status != SubscriptionStatus.DISABLED.value:
                 await deactivate_subscription(db, subscription)
-                logger.info('Webhook: subscription %s disabled for user %s', subscription.id, user.id)
+                logger.info('Webhook: subscription disabled for user', subscription_id=subscription.id, user_id=user.id)
             else:
                 await db.commit()
 
@@ -493,7 +496,9 @@ class RemnaWaveWebhookService:
             self._stamp_webhook_update(subscription)
             if subscription.status == SubscriptionStatus.DISABLED.value:
                 await reactivate_subscription(db, subscription)
-                logger.info('Webhook: subscription %s re-enabled for user %s', subscription.id, user.id)
+                logger.info(
+                    'Webhook: subscription re-enabled for user', subscription_id=subscription.id, user_id=user.id
+                )
             else:
                 await db.commit()
 
@@ -506,7 +511,9 @@ class RemnaWaveWebhookService:
             self._stamp_webhook_update(subscription)
             if subscription.status == SubscriptionStatus.ACTIVE.value:
                 await deactivate_subscription(db, subscription)
-                logger.info('Webhook: subscription %s limited (traffic) for user %s', subscription.id, user.id)
+                logger.info(
+                    'Webhook: subscription limited (traffic) for user', subscription_id=subscription.id, user_id=user.id
+                )
             else:
                 await db.commit()
 
@@ -521,7 +528,9 @@ class RemnaWaveWebhookService:
             # Re-enable if was disabled due to traffic limit
             if subscription.status == SubscriptionStatus.DISABLED.value:
                 await reactivate_subscription(db, subscription)
-            logger.info('Webhook: traffic reset for subscription %s, user %s', subscription.id, user.id)
+            logger.info(
+                'Webhook: traffic reset for subscription , user', subscription_id=subscription.id, user_id=user.id
+            )
 
         await self._notify_user(user, 'WEBHOOK_SUB_TRAFFIC_RESET', reply_markup=self._get_subscription_keyboard(user))
 
@@ -560,7 +569,7 @@ class RemnaWaveWebhookService:
         if expire_at:
             try:
                 parsed_dt = datetime.fromisoformat(expire_at.replace('Z', '+00:00'))
-                new_end_date = parsed_dt.astimezone(UTC).replace(tzinfo=None)
+                new_end_date = parsed_dt.astimezone(UTC)
                 if subscription.end_date != new_end_date:
                     subscription.end_date = new_end_date
                     changed = True
@@ -570,17 +579,17 @@ class RemnaWaveWebhookService:
         # Sync status from panel
         panel_status = data.get('status')
         if panel_status:
-            now = datetime.now(UTC).replace(tzinfo=None)
+            now = datetime.now(UTC)
             end_date = subscription.end_date
             if panel_status == 'ACTIVE' and end_date and end_date > now:
                 if subscription.status != SubscriptionStatus.ACTIVE.value:
                     subscription.status = SubscriptionStatus.ACTIVE.value
                     changed = True
                     logger.info(
-                        'Webhook: subscription %s reactivated (%s → active) for user %s',
-                        subscription.id,
-                        subscription.status,
-                        user.id,
+                        'Webhook: subscription reactivated (→ active) for user',
+                        subscription_id=subscription.id,
+                        subscription_status=subscription.status,
+                        user_id=user.id,
                     )
             elif panel_status == 'DISABLED':
                 if subscription.status != SubscriptionStatus.DISABLED.value:
@@ -600,8 +609,12 @@ class RemnaWaveWebhookService:
         # Always stamp to protect from sync overwrite, even if no fields changed
         self._stamp_webhook_update(subscription)
         if changed:
-            subscription.updated_at = datetime.now(UTC).replace(tzinfo=None)
-            logger.info('Webhook: subscription %s modified (synced from panel) for user %s', subscription.id, user.id)
+            subscription.updated_at = datetime.now(UTC)
+            logger.info(
+                'Webhook: subscription modified (synced from panel) for user',
+                subscription_id=subscription.id,
+                user_id=user.id,
+            )
         await db.commit()
 
     async def _handle_user_deleted(
@@ -622,28 +635,32 @@ class RemnaWaveWebhookService:
             except Exception:
                 # Subscription was cascade-deleted, re-fetch user and skip subscription updates
                 logger.warning(
-                    'Webhook: subscription %s already deleted for user %s, skipping subscription cleanup',
-                    sub_id,
-                    user_id,
+                    'Webhook: subscription already deleted for user , skipping subscription cleanup',
+                    sub_id=sub_id,
+                    user_id=user_id,
                 )
                 subscription = None
                 try:
-                    await db.refresh(user)
+                    await db.rollback()
                 except Exception:
-                    from app.database.crud.user import get_user_by_id
+                    pass
 
+                try:
                     user = await get_user_by_id(db, user_id)
-                    if not user:
-                        logger.error('Webhook: user %s not found after rollback', user_id)
-                        return
+                except Exception:
+                    logger.error('Webhook: user not found after rollback', user_id=user_id)
+                    return
+                if not user:
+                    logger.error('Webhook: user not found after rollback', user_id=user_id)
+                    return
 
         if subscription:
             if subscription.status != SubscriptionStatus.EXPIRED.value:
                 subscription.status = SubscriptionStatus.EXPIRED.value
                 logger.info(
-                    'Webhook: subscription %s marked expired (user deleted in panel) for user %s',
-                    sub_id,
-                    user_id,
+                    'Webhook: subscription marked expired (user deleted in panel) for user',
+                    sub_id=sub_id,
+                    user_id=user_id,
                 )
 
             # Clear subscription data — panel user no longer exists
@@ -651,7 +668,7 @@ class RemnaWaveWebhookService:
             subscription.subscription_crypto_link = None
             subscription.remnawave_short_uuid = None
             subscription.connected_squads = None
-            subscription.updated_at = datetime.now(UTC).replace(tzinfo=None)
+            subscription.updated_at = datetime.now(UTC)
 
             # Remove SubscriptionServer link rows
             await db.execute(delete(SubscriptionServer).where(SubscriptionServer.subscription_id == sub_id))
@@ -686,9 +703,11 @@ class RemnaWaveWebhookService:
             # Always stamp to protect from sync overwrite
             self._stamp_webhook_update(subscription)
             if changed:
-                subscription.updated_at = datetime.now(UTC).replace(tzinfo=None)
+                subscription.updated_at = datetime.now(UTC)
                 logger.info(
-                    'Webhook: subscription %s credentials revoked/updated for user %s', subscription.id, user.id
+                    'Webhook: subscription credentials revoked/updated for user',
+                    subscription_id=subscription.id,
+                    user_id=user.id,
                 )
             await db.commit()
 
@@ -697,7 +716,7 @@ class RemnaWaveWebhookService:
     async def _handle_user_created(
         self, db: AsyncSession, user: User, subscription: Subscription | None, data: dict
     ) -> None:
-        logger.info('Webhook: user %s created externally in panel (uuid=%s)', user.id, data.get('uuid'))
+        logger.info('Webhook: user created externally in panel (uuid=)', user_id=user.id, data=data.get('uuid'))
 
     async def _handle_expires_in_72h(
         self, db: AsyncSession, user: User, subscription: Subscription | None, data: dict
@@ -722,7 +741,7 @@ class RemnaWaveWebhookService:
     async def _handle_first_connected(
         self, db: AsyncSession, user: User, subscription: Subscription | None, data: dict
     ) -> None:
-        logger.info('Webhook: user %s first VPN connection', user.id)
+        logger.info('Webhook: user first VPN connection', user_id=user.id)
         await self._notify_user(user, 'WEBHOOK_SUB_FIRST_CONNECTED', reply_markup=self._get_subscription_keyboard(user))
 
     async def _handle_bandwidth_threshold(
@@ -749,7 +768,7 @@ class RemnaWaveWebhookService:
     async def _handle_user_not_connected(
         self, db: AsyncSession, user: User, subscription: Subscription | None, data: dict
     ) -> None:
-        logger.info('Webhook: user %s has not connected to VPN', user.id)
+        logger.info('Webhook: user has not connected to VPN', user_id=user.id)
         await self._notify_user(user, 'WEBHOOK_USER_NOT_CONNECTED', reply_markup=self._get_connect_keyboard(user))
 
     # ------------------------------------------------------------------
@@ -792,7 +811,7 @@ class RemnaWaveWebhookService:
         self, db: AsyncSession, user: User, subscription: Subscription | None, data: dict
     ) -> None:
         device_name = self._extract_device_name(data)
-        logger.info('Webhook: device added for user %s: %s', user.id, device_name or '(empty)')
+        logger.info('Webhook: device added for user', user_id=user.id, device_name=device_name or '(empty)')
         await self._notify_user(
             user,
             'WEBHOOK_DEVICE_ADDED',
@@ -804,7 +823,7 @@ class RemnaWaveWebhookService:
         self, db: AsyncSession, user: User, subscription: Subscription | None, data: dict
     ) -> None:
         device_name = self._extract_device_name(data)
-        logger.info('Webhook: device deleted for user %s: %s', user.id, device_name or '(empty)')
+        logger.info('Webhook: device deleted for user', user_id=user.id, device_name=device_name or '(empty)')
         await self._notify_user(
             user,
             'WEBHOOK_DEVICE_DELETED',

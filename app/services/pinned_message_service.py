@@ -1,7 +1,7 @@
 import asyncio
-import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
+import structlog
 from aiogram import Bot
 from aiogram.exceptions import (
     TelegramBadRequest,
@@ -17,7 +17,7 @@ from app.database.models import PinnedMessage, User, UserStatus
 from app.utils.validators import sanitize_html, validate_html_tags
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def get_active_pinned_message(db: AsyncSession) -> PinnedMessage | None:
@@ -76,7 +76,7 @@ async def set_active_pinned_message(
     await db.commit()
     await db.refresh(pinned_message)
 
-    logger.info('Создано новое закрепленное сообщение #%s', pinned_message.id)
+    logger.info('Создано новое закрепленное сообщение #', pinned_message_id=pinned_message.id)
     return pinned_message
 
 
@@ -86,10 +86,10 @@ async def deactivate_active_pinned_message(db: AsyncSession) -> PinnedMessage | 
         return None
 
     pinned_message.is_active = False
-    pinned_message.updated_at = datetime.utcnow()
+    pinned_message.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(pinned_message)
-    logger.info('Деактивировано закрепленное сообщение #%s', pinned_message.id)
+    logger.info('Деактивировано закрепленное сообщение #', pinned_message_id=pinned_message.id)
     return pinned_message
 
 
@@ -175,20 +175,19 @@ async def broadcast_pinned_message(
                     break
                 except TelegramRetryAfter as retry_error:
                     delay = min(retry_error.retry_after + 1, 30)
-                    logger.warning(
-                        'RetryAfter for user %s, waiting %s seconds',
-                        telegram_id,
-                        delay,
-                    )
+                    logger.warning('RetryAfter for user , waiting seconds', telegram_id=telegram_id, delay=delay)
                     await asyncio.sleep(delay)
                 except Exception as send_error:
                     logger.error(
-                        'Ошибка отправки закрепленного сообщения пользователю %s: %s',
-                        telegram_id,
-                        send_error,
+                        'Ошибка отправки закрепленного сообщения пользователю',
+                        telegram_id=telegram_id,
+                        send_error=send_error,
                     )
                     failed_count += 1
                     break
+            else:
+                # All retry attempts exhausted (TelegramRetryAfter on every attempt)
+                failed_count += 1
 
     for i in range(0, len(recipient_telegram_ids), 30):
         batch = recipient_telegram_ids[i : i + 30]
@@ -251,29 +250,8 @@ async def unpin_active_pinned_message(
                     unpinned_count += 1
                 else:
                     failed_count += 1
-            except TelegramRetryAfter as retry_error:
-                delay = min(retry_error.retry_after + 1, 30)
-                logger.warning(
-                    'RetryAfter while unpinning for user %s, waiting %s seconds',
-                    telegram_id,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-                # Повторная попытка после ожидания
-                try:
-                    success = await _unpin_message_for_user(bot, telegram_id)
-                    if success:
-                        unpinned_count += 1
-                    else:
-                        failed_count += 1
-                except Exception:
-                    failed_count += 1
             except Exception as error:
-                logger.error(
-                    'Ошибка открепления сообщения у пользователя %s: %s',
-                    telegram_id,
-                    error,
-                )
+                logger.error('Ошибка открепления сообщения у пользователя', telegram_id=telegram_id, error=error)
                 failed_count += 1
 
     for i in range(0, len(recipient_telegram_ids), 40):
@@ -298,7 +276,7 @@ async def _mark_pinned_delivery(
             .where(User.id == user_id)
             .values(
                 last_pinned_message_id=pinned_message_id,
-                updated_at=datetime.utcnow(),
+                updated_at=datetime.now(UTC),
             )
         )
         await session.commit()
@@ -311,6 +289,12 @@ async def _send_and_pin_message(bot: Bot, chat_id: int, pinned_message: PinnedMe
         pass
     except TelegramForbiddenError:
         return False
+    except TelegramRetryAfter as e:
+        await asyncio.sleep(min(e.retry_after + 1, 30))
+        try:
+            await bot.unpin_all_chat_messages(chat_id=chat_id)
+        except (TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter):
+            pass
 
     try:
         if pinned_message.media_type == 'photo' and pinned_message.media_file_id:
@@ -345,34 +329,45 @@ async def _send_and_pin_message(bot: Bot, chat_id: int, pinned_message: PinnedMe
         return True
     except TelegramForbiddenError:
         return False
+    except TelegramRetryAfter as e:
+        await asyncio.sleep(min(e.retry_after + 1, 30))
+        raise  # Propagate to caller's retry loop
     except TelegramBadRequest as error:
-        logger.warning(
-            'Некорректный запрос при отправке закрепленного сообщения в чат %s: %s',
-            chat_id,
-            error,
-        )
+        logger.warning('Некорректный запрос при отправке закрепленного сообщения в чат', chat_id=chat_id, error=error)
     except Exception as error:
-        logger.error(
-            'Не удалось отправить закрепленное сообщение пользователю %s: %s',
-            chat_id,
-            error,
-        )
+        logger.error('Не удалось отправить закрепленное сообщение пользователю', chat_id=chat_id, error=error)
 
     return False
 
 
-async def _unpin_message_for_user(bot: Bot, chat_id: int) -> bool:
-    try:
-        await bot.unpin_all_chat_messages(chat_id=chat_id)
-        return True
-    except TelegramForbiddenError:
-        return False
-    except TelegramBadRequest:
-        return False
-    except Exception as error:
-        logger.error(
-            'Не удалось открепить сообщение у пользователя %s: %s',
-            chat_id,
-            error,
-        )
-        return False
+async def _unpin_message_for_user(bot: Bot, chat_id: int, max_retries: int = 3) -> bool:
+    for attempt in range(max_retries):
+        try:
+            await bot.unpin_all_chat_messages(chat_id=chat_id)
+            return True
+        except TelegramRetryAfter as e:
+            if attempt < max_retries - 1:
+                delay = min(e.retry_after + 1, 30)
+                logger.warning(
+                    'RetryAfter при откреплении для , ожидание сек (попытка /)',
+                    chat_id=chat_id,
+                    delay=delay,
+                    attempt=attempt + 1,
+                    max_retries=max_retries,
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.warning(
+                    'Не удалось открепить сообщение у после попыток (flood control)',
+                    chat_id=chat_id,
+                    max_retries=max_retries,
+                )
+                return False
+        except TelegramForbiddenError:
+            return False
+        except TelegramBadRequest:
+            return False
+        except Exception as error:
+            logger.error('Не удалось открепить сообщение у пользователя', chat_id=chat_id, error=error)
+            return False
+    return False

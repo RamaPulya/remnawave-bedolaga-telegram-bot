@@ -1,8 +1,8 @@
 """OAuth 2.0 authentication routes for cabinet."""
 
-import logging
 from datetime import UTC, datetime
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,20 +24,30 @@ from ..auth.oauth_providers import (
 )
 from ..dependencies import get_cabinet_db
 from ..schemas.auth import AuthResponse
-from .auth import _create_auth_response, _store_refresh_token
+from .auth import _create_auth_response, _process_campaign_bonus, _store_refresh_token
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix='/auth/oauth', tags=['Cabinet OAuth'])
 
 
-async def _finalize_oauth_login(db: AsyncSession, user: User, provider: str) -> AuthResponse:
+async def _finalize_oauth_login(
+    db: AsyncSession,
+    user: User,
+    provider: str,
+    campaign_slug: str | None = None,
+) -> AuthResponse:
     """Update last login, create tokens, store refresh token."""
-    user.cabinet_last_login = datetime.now(UTC).replace(tzinfo=None)
+    user.cabinet_last_login = datetime.now(UTC)
     await db.commit()
     auth_response = _create_auth_response(user)
     await _store_refresh_token(db, user.id, auth_response.refresh_token, device_info=f'oauth:{provider}')
+    auth_response.campaign_bonus = await _process_campaign_bonus(db, user, campaign_slug)
+    if auth_response.campaign_bonus:
+        from .auth import _user_to_response
+
+        auth_response.user = _user_to_response(user)
     return auth_response
 
 
@@ -61,6 +71,9 @@ class OAuthAuthorizeResponse(BaseModel):
 class OAuthCallbackRequest(BaseModel):
     code: str = Field(..., description='Authorization code from provider')
     state: str = Field(..., description='CSRF state token')
+    campaign_slug: str | None = Field(
+        None, min_length=1, max_length=64, pattern=r'^[a-zA-Z0-9_-]+$', description='Campaign slug from web link'
+    )
 
 
 # --- Endpoints ---
@@ -120,7 +133,7 @@ async def oauth_callback(
     try:
         token_data = await oauth_provider.exchange_code(request.code)
     except Exception as exc:
-        logger.error('OAuth code exchange failed for %s: %s', provider, exc)
+        logger.error('OAuth code exchange failed for', provider=provider, exc=exc)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail='Failed to exchange authorization code',
@@ -130,7 +143,7 @@ async def oauth_callback(
     try:
         user_info: OAuthUserInfo = await oauth_provider.get_user_info(token_data)
     except Exception as exc:
-        logger.error('OAuth user info fetch failed for %s: %s', provider, exc)
+        logger.error('OAuth user info fetch failed for', provider=provider, exc=exc)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail='Failed to fetch user information from provider',
@@ -139,16 +152,16 @@ async def oauth_callback(
     # 5. Find user by provider ID
     user = await get_user_by_oauth_provider(db, provider, user_info.provider_id)
     if user:
-        logger.info('OAuth login via %s for existing user %s', provider, user.id)
-        return await _finalize_oauth_login(db, user, provider)
+        logger.info('OAuth login via for existing user', provider=provider, user_id=user.id)
+        return await _finalize_oauth_login(db, user, provider, request.campaign_slug)
 
     # 6. Find user by email (if verified) and link provider
     if user_info.email and user_info.email_verified:
         user = await get_user_by_email(db, user_info.email)
         if user:
             await set_user_oauth_provider_id(db, user, provider, user_info.provider_id)
-            logger.info('OAuth login via %s linked to existing email user %s', provider, user.id)
-            return await _finalize_oauth_login(db, user, provider)
+            logger.info('OAuth login via linked to existing email user', provider=provider, user_id=user.id)
+            return await _finalize_oauth_login(db, user, provider, request.campaign_slug)
 
     # 7. Create new user
     user = await create_user_by_oauth(
@@ -161,5 +174,5 @@ async def oauth_callback(
         last_name=user_info.last_name,
         username=user_info.username,
     )
-    logger.info('OAuth new user created via %s with id=%s', provider, user.id)
-    return await _finalize_oauth_login(db, user, provider)
+    logger.info('OAuth new user created via with id', provider=provider, user_id=user.id)
+    return await _finalize_oauth_login(db, user, provider, request.campaign_slug)

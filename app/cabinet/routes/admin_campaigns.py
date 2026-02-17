@@ -1,7 +1,6 @@
 """Admin routes for managing advertising campaigns in cabinet."""
 
-import logging
-
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,7 +44,7 @@ from ..schemas.campaigns import (
 from ..schemas.tariffs import TariffListItem
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix='/admin/campaigns', tags=['Cabinet Admin Campaigns'])
 
@@ -56,6 +55,14 @@ def _get_deep_link(start_parameter: str) -> str:
     if bot_username:
         return f'https://t.me/{bot_username}?start={start_parameter}'
     return f'?start={start_parameter}'
+
+
+def _get_web_link(start_parameter: str) -> str | None:
+    """Generate web link for campaign."""
+    base_url = (settings.MINIAPP_CUSTOM_URL or '').rstrip('/')
+    if base_url:
+        return f'{base_url}/?campaign={start_parameter}'
+    return None
 
 
 @router.get('/overview', response_model=CampaignsOverviewResponse)
@@ -206,6 +213,7 @@ async def get_campaign(
         created_at=campaign.created_at,
         updated_at=campaign.updated_at,
         deep_link=_get_deep_link(campaign.start_parameter),
+        web_link=_get_web_link(campaign.start_parameter),
     )
 
 
@@ -249,6 +257,7 @@ async def get_campaign_stats(
         conversion_rate=stats['conversion_rate'],
         trial_conversion_rate=stats['trial_conversion_rate'],
         deep_link=_get_deep_link(campaign.start_parameter),
+        web_link=_get_web_link(campaign.start_parameter),
     )
 
 
@@ -289,19 +298,22 @@ async def get_campaign_registrations(
     )
     total = count_result.scalar() or 0
 
-    items = []
-    for reg, user in rows:
-        # Check if user has subscription
+    # Batch query: find which users have active subscriptions (avoids N+1)
+    user_ids = [user.id for _reg, user in rows]
+    active_sub_user_ids: set[int] = set()
+    if user_ids:
         sub_result = await db.execute(
-            select(Subscription)
+            select(Subscription.user_id)
             .where(
-                Subscription.user_id == user.id,
+                Subscription.user_id.in_(user_ids),
                 Subscription.status == 'active',
             )
-            .limit(1)
+            .distinct()
         )
-        has_sub = sub_result.scalar_one_or_none() is not None
+        active_sub_user_ids = set(sub_result.scalars().all())
 
+    items = []
+    for reg, user in rows:
         items.append(
             CampaignRegistrationItem(
                 id=reg.id,
@@ -316,7 +328,7 @@ async def get_campaign_registrations(
                 tariff_duration_days=reg.tariff_duration_days,
                 created_at=reg.created_at,
                 user_balance_kopeks=user.balance_kopeks or 0,
-                has_subscription=has_sub,
+                has_subscription=user.id in active_sub_user_ids,
                 has_paid=user.has_had_paid_subscription or False,
             )
         )
@@ -378,7 +390,7 @@ async def create_new_campaign(
     # Reload to get tariff relationship
     campaign = await get_campaign_by_id(db, campaign.id)
 
-    logger.info(f'Admin {admin.id} created campaign {campaign.id}: {campaign.name}')
+    logger.info('Admin created campaign', admin_id=admin.id, campaign_id=campaign.id, campaign_name=campaign.name)
 
     return await get_campaign(campaign.id, admin, db)
 
@@ -447,7 +459,7 @@ async def update_existing_campaign(
     if updates:
         await update_campaign(db, campaign, **updates)
 
-    logger.info(f'Admin {admin.id} updated campaign {campaign_id}')
+    logger.info('Admin updated campaign', admin_id=admin.id, campaign_id=campaign_id)
 
     return await get_campaign(campaign_id, admin, db)
 
@@ -475,7 +487,7 @@ async def delete_existing_campaign(
         )
 
     await delete_campaign(db, campaign)
-    logger.info(f'Admin {admin.id} deleted campaign {campaign_id}: {campaign.name}')
+    logger.info('Admin deleted campaign', admin_id=admin.id, campaign_id=campaign_id, campaign_name=campaign.name)
 
     return {'message': 'Campaign deleted successfully'}
 
@@ -498,7 +510,7 @@ async def toggle_campaign(
     await update_campaign(db, campaign, is_active=new_status)
 
     status_text = 'activated' if new_status else 'deactivated'
-    logger.info(f'Admin {admin.id} {status_text} campaign {campaign_id}')
+    logger.info('Admin campaign', admin_id=admin.id, status_text=status_text, campaign_id=campaign_id)
 
     return CampaignToggleResponse(
         id=campaign_id,

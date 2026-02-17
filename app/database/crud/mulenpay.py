@@ -1,6 +1,6 @@
-import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,7 +8,7 @@ from app.config import settings
 from app.database.models import MulenPayPayment
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def create_mulenpay_payment(
@@ -41,12 +41,12 @@ async def create_mulenpay_payment(
     await db.refresh(payment)
 
     logger.info(
-        'Создан %s платеж #%s (uuid=%s) на сумму %s копеек для пользователя %s',
-        settings.get_mulenpay_display_name(),
-        payment.mulen_payment_id,
-        uuid,
-        amount_kopeks,
-        user_id,
+        'Создан платеж # (uuid=) на сумму копеек для пользователя',
+        get_mulenpay_display_name=settings.get_mulenpay_display_name(),
+        mulen_payment_id=payment.mulen_payment_id,
+        uuid=uuid,
+        amount_kopeks=amount_kopeks,
+        user_id=user_id,
     )
 
     return payment
@@ -90,7 +90,7 @@ async def update_mulenpay_payment_status(
     if metadata is not None:
         payment.metadata_json = metadata
 
-    payment.updated_at = datetime.utcnow()
+    payment.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(payment)
     return payment
@@ -103,7 +103,7 @@ async def update_mulenpay_payment_metadata(
     metadata: dict,
 ) -> MulenPayPayment:
     payment.metadata_json = metadata
-    payment.updated_at = datetime.utcnow()
+    payment.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(payment)
     return payment
@@ -116,7 +116,7 @@ async def link_mulenpay_payment_to_transaction(
     transaction_id: int,
 ) -> MulenPayPayment:
     payment.transaction_id = transaction_id
-    payment.updated_at = datetime.utcnow()
+    payment.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(payment)
     return payment

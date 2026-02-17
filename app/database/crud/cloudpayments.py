@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import CloudPaymentsPayment
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def create_cloudpayments_payment(
@@ -65,10 +65,10 @@ async def create_cloudpayments_payment(
     await db.refresh(payment)
 
     logger.debug(
-        'Created CloudPayments payment: id=%s, invoice=%s, amount=%s',
-        payment.id,
-        invoice_id,
-        amount_kopeks,
+        'Created CloudPayments payment: id invoice amount',
+        payment_id=payment.id,
+        invoice_id=invoice_id,
+        amount_kopeks=amount_kopeks,
     )
 
     return payment
@@ -127,7 +127,7 @@ async def update_cloudpayments_payment(
         if hasattr(payment, key):
             setattr(payment, key, value)
 
-    payment.updated_at = datetime.utcnow()
+    payment.updated_at = datetime.now(UTC)
     await db.flush()
     await db.refresh(payment)
 
@@ -171,7 +171,7 @@ async def mark_cloudpayments_payment_as_paid(
 
     payment.status = 'completed'
     payment.is_paid = True
-    payment.paid_at = datetime.utcnow()
+    payment.paid_at = datetime.now(UTC)
 
     if transaction_id_cp is not None:
         payment.transaction_id_cp = transaction_id_cp
@@ -190,14 +190,12 @@ async def mark_cloudpayments_payment_as_paid(
     if callback_payload:
         payment.callback_payload = callback_payload
 
-    payment.updated_at = datetime.utcnow()
+    payment.updated_at = datetime.now(UTC)
     await db.flush()
     await db.refresh(payment)
 
     logger.info(
-        'Marked CloudPayments payment as paid: id=%s, invoice=%s',
-        payment.id,
-        payment.invoice_id,
+        'Marked CloudPayments payment as paid: id invoice', payment_id=payment.id, invoice_id=payment.invoice_id
     )
 
     return payment

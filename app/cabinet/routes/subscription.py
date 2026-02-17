@@ -2,11 +2,11 @@
 
 import base64
 import json
-import logging
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,7 +58,7 @@ from ..schemas.subscription import (
 )
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix='/subscription', tags=['Cabinet Subscription'])
 
@@ -135,7 +135,7 @@ def _subscription_to_response(
     traffic_purchases: list[dict[str, Any]] | None = None,
 ) -> SubscriptionData:
     """Convert Subscription model to response."""
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
 
     # Use actual_status property for correct status (same as bot uses)
     actual_status = subscription.actual_status
@@ -276,7 +276,7 @@ async def get_subscription(
     traffic_purchases_data = []
     from app.database.models import TrafficPurchase
 
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     purchases_query = (
         select(TrafficPurchase)
         .where(TrafficPurchase.subscription_id == fresh_user.subscription.id)
@@ -490,9 +490,9 @@ async def renew_subscription(
 
         try:
             await user_cart_service.save_user_cart(user.id, cart_data)
-            logger.info(f'Cart saved for auto-renewal (cabinet) user {user.id}')
+            logger.info('Cart saved for auto-renewal (cabinet) user', user_id=user.id)
         except Exception as e:
-            logger.error(f'Error saving cart for auto-renewal (cabinet): {e}')
+            logger.error('Error saving cart for auto-renewal (cabinet)', error=e)
 
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
@@ -515,7 +515,7 @@ async def renew_subscription(
         user.promo_offer_discount_expires_at = None
 
     # Extend from end_date or now if expired
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     if user.subscription.end_date and user.subscription.end_date > now:
         user.subscription.end_date = user.subscription.end_date + timedelta(days=request.period_days)
     else:
@@ -550,7 +550,7 @@ async def renew_subscription(
             finally:
                 await bot.session.close()
     except Exception as e:
-        logger.error(f'Failed to send admin notification for subscription renewal: {e}')
+        logger.error('Failed to send admin notification for subscription renewal', error=e)
 
     response = {
         'message': 'Subscription renewed successfully',
@@ -598,6 +598,8 @@ async def get_traffic_packages(
         result = []
 
         for gb, price in packages.items():
+            if price <= 0:
+                continue
             result.append(
                 TrafficPackageResponse(
                     gb=gb,
@@ -624,6 +626,8 @@ async def get_traffic_packages(
 
     for pkg in packages:
         if not pkg.get('enabled', True):
+            continue
+        if pkg['price'] <= 0:
             continue
 
         result.append(
@@ -705,6 +709,11 @@ async def purchase_traffic(
                 detail=f'Traffic package {request.gb}GB is not available',
             )
         base_price_kopeks = packages[request.gb]
+        if base_price_kopeks <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f'Traffic package {request.gb}GB has no price configured',
+            )
 
     else:
         # Classic режим
@@ -732,6 +741,11 @@ async def purchase_traffic(
                 detail='Invalid traffic package',
             )
         base_price_kopeks = matching_pkg['price']
+        if base_price_kopeks <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Traffic package has no price configured',
+            )
 
     # На тарифах пакеты трафика покупаются на 1 месяц (30 дней),
     # цена в тарифе уже месячная — не умножаем на оставшиеся месяцы подписки.
@@ -775,11 +789,13 @@ async def purchase_traffic(
         try:
             await user_cart_service.save_user_cart(user.id, cart_data)
             logger.info(
-                f'Cart saved for traffic purchase (cabinet) user {user.id}: '
-                f'+{request.gb} GB, discount {traffic_discount_percent}%'
+                'Cart saved for traffic purchase (cabinet) user + discount',
+                user_id=user.id,
+                gb=request.gb,
+                traffic_discount_percent=traffic_discount_percent,
             )
         except Exception as e:
-            logger.error(f'Error saving cart for traffic purchase (cabinet): {e}')
+            logger.error('Error saving cart for traffic purchase (cabinet)', error=e)
 
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
@@ -816,10 +832,14 @@ async def purchase_traffic(
     # Устанавливаем дату сброса трафика (только при первой докупке)
     # При повторной докупке дата НЕ продлевается
     if not subscription.traffic_reset_at:
-        from datetime import timedelta
+        from datetime import UTC, timedelta
 
-        subscription.traffic_reset_at = datetime.utcnow() + timedelta(days=30)
-        logger.info(f'Set traffic_reset_at for subscription {subscription.id}: {subscription.traffic_reset_at}')
+        subscription.traffic_reset_at = datetime.now(UTC) + timedelta(days=30)
+        logger.info(
+            'Set traffic_reset_at for subscription',
+            subscription_id=subscription.id,
+            traffic_reset_at=subscription.traffic_reset_at,
+        )
 
     await db.commit()
 
@@ -831,7 +851,7 @@ async def purchase_traffic(
         else:
             await subscription_service.create_remnawave_user(db, subscription)
     except Exception as e:
-        logger.error(f'Failed to sync traffic with RemnaWave: {e}')
+        logger.error('Failed to sync traffic with RemnaWave', error=e)
 
     # Создаём транзакцию
     await create_transaction(
@@ -868,7 +888,7 @@ async def purchase_traffic(
             finally:
                 await bot.session.close()
     except Exception as e:
-        logger.error(f'Failed to send admin notification for traffic purchase: {e}')
+        logger.error('Failed to send admin notification for traffic purchase', error=e)
 
     response = {
         'success': True,
@@ -932,9 +952,13 @@ async def purchase_devices_legacy(
                 'source': 'cabinet',
             }
             await user_cart_service.save_user_cart(user.id, cart_data)
-            logger.info(f'Cart saved for device purchase (cabinet /devices) user {user.id}: +{request.devices} devices')
+            logger.info(
+                'Cart saved for device purchase (cabinet /devices) user + devices',
+                user_id=user.id,
+                devices=request.devices,
+            )
         except Exception as e:
-            logger.error(f'Error saving cart for device purchase (cabinet /devices): {e}')
+            logger.error('Error saving cart for device purchase (cabinet /devices)', error=e)
 
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
@@ -1006,7 +1030,7 @@ async def purchase_devices_legacy(
             finally:
                 await bot.session.close()
     except Exception as e:
-        logger.error(f'Failed to send admin notification for device purchase: {e}')
+        logger.error('Failed to send admin notification for device purchase', error=e)
 
     response = {
         'message': 'Devices added successfully',
@@ -1109,11 +1133,11 @@ async def get_trial_info(
             if tariff_trial_days:
                 duration_days = tariff_trial_days
     except Exception as e:
-        logger.error(f'Error getting trial tariff for info: {e}')
+        logger.error('Error getting trial tariff for info', error=e)
 
     # Check if user already has an active subscription
     if user.subscription:
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         is_active = (
             user.subscription.status == 'active' and user.subscription.end_date and user.subscription.end_date > now
         )
@@ -1170,7 +1194,7 @@ async def activate_trial(
 
     # Check if user already has an active subscription
     if user.subscription:
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         is_active = (
             user.subscription.status == 'active' and user.subscription.end_date and user.subscription.end_date > now
         )
@@ -1197,7 +1221,7 @@ async def activate_trial(
                 detail=f'Insufficient balance. Need {price_kopeks / 100:.2f} RUB',
             )
         user.balance_kopeks -= price_kopeks
-        logger.info(f'User {user.id} paid {price_kopeks} kopeks for trial activation')
+        logger.info('User paid kopeks for trial activation', user_id=user.id, price_kopeks=price_kopeks)
 
     # Get trial parameters from tariff if configured (same logic as bot handler)
     trial_duration = settings.TRIAL_DURATION_DAYS
@@ -1229,9 +1253,14 @@ async def activate_trial(
             tariff_trial_days = getattr(trial_tariff, 'trial_duration_days', None)
             if tariff_trial_days:
                 trial_duration = tariff_trial_days
-            logger.info(f'Using trial tariff {trial_tariff.name} (ID: {trial_tariff.id}) with squads: {trial_squads}')
+            logger.info(
+                'Using trial tariff (ID: ) with squads',
+                trial_tariff_name=trial_tariff.name,
+                trial_tariff_id=trial_tariff.id,
+                trial_squads=trial_squads,
+            )
     except Exception as e:
-        logger.error(f'Error getting trial tariff: {e}')
+        logger.error('Error getting trial tariff', error=e)
 
     # Create trial subscription
     subscription = await create_trial_subscription(
@@ -1244,7 +1273,7 @@ async def activate_trial(
         tariff_id=tariff_id_for_trial,
     )
 
-    logger.info(f'Trial subscription activated for user {user.id}')
+    logger.info('Trial subscription activated for user', user_id=user.id)
 
     # Create RemnaWave user
     try:
@@ -1253,7 +1282,7 @@ async def activate_trial(
             await subscription_service.create_remnawave_user(db, subscription)
             await db.refresh(subscription)
     except Exception as e:
-        logger.error(f'Failed to create RemnaWave user for trial: {e}')
+        logger.error('Failed to create RemnaWave user for trial', error=e)
 
     # Send admin notification about trial activation
     try:
@@ -1272,7 +1301,7 @@ async def activate_trial(
             finally:
                 await bot.session.close()
     except Exception as e:
-        logger.error(f'Failed to send trial activation notification: {e}')
+        logger.error('Failed to send trial activation notification', error=e)
 
     return _subscription_to_response(subscription)
 
@@ -1537,7 +1566,7 @@ async def get_purchase_options(
             detail=str(e),
         )
     except Exception as e:
-        logger.error(f'Failed to build purchase options for user {user.id}: {e}')
+        logger.error('Failed to build purchase options for user', user_id=user.id, error=e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail='Failed to load purchase options',
@@ -1582,7 +1611,7 @@ async def preview_purchase(
             detail=str(e),
         )
     except Exception as e:
-        logger.error(f'Failed to calculate purchase preview for user {user.id}: {e}')
+        logger.error('Failed to calculate purchase preview for user', user_id=user.id, error=e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail='Failed to calculate price',
@@ -1644,7 +1673,7 @@ async def submit_purchase(
                     bot=None,
                 )
             except Exception as notif_error:
-                logger.warning(f'Failed to send subscription notification to {user.email}: {notif_error}')
+                logger.warning('Failed to send subscription notification to', email=user.email, notif_error=notif_error)
 
         # Отправляем уведомление админам о покупке подписки
         try:
@@ -1670,7 +1699,7 @@ async def submit_purchase(
                 finally:
                     await bot.session.close()
         except Exception as e:
-            logger.error(f'Failed to send admin notification for subscription purchase: {e}')
+            logger.error('Failed to send admin notification for subscription purchase', error=e)
 
         return {
             'success': True,
@@ -1702,9 +1731,9 @@ async def submit_purchase(
                 'source': 'cabinet',
             }
             await user_cart_service.save_user_cart(user.id, cart_data)
-            logger.info(f'Cart saved for auto-purchase (cabinet /purchase) user {user.id}')
+            logger.info('Cart saved for auto-purchase (cabinet /purchase) user', user_id=user.id)
         except Exception as cart_error:
-            logger.error(f'Error saving cart for auto-purchase (cabinet /purchase): {cart_error}')
+            logger.error('Error saving cart for auto-purchase (cabinet /purchase)', cart_error=cart_error)
 
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
@@ -1716,7 +1745,7 @@ async def submit_purchase(
             },
         )
     except Exception as e:
-        logger.error(f'Failed to submit purchase for user {user.id}: {e}')
+        logger.error('Failed to submit purchase for user', user_id=user.id, error=e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail='Failed to process purchase',
@@ -1898,9 +1927,9 @@ async def purchase_tariff(
 
             try:
                 await user_cart_service.save_user_cart(user.id, cart_data)
-                logger.info(f'Cart saved for auto-purchase (cabinet) user {user.id}, tariff {tariff.id}')
+                logger.info('Cart saved for auto-purchase (cabinet) user tariff', user_id=user.id, tariff_id=tariff.id)
             except Exception as e:
-                logger.error(f'Error saving cart for auto-purchase (cabinet): {e}')
+                logger.error('Error saving cart for auto-purchase (cabinet)', error=e)
 
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
@@ -1981,7 +2010,7 @@ async def purchase_tariff(
 
         # For daily tariffs, set last_daily_charge_at
         if is_daily_tariff:
-            subscription.last_daily_charge_at = datetime.utcnow()
+            subscription.last_daily_charge_at = datetime.now(UTC)
             subscription.is_daily_paused = False
             await db.commit()
             await db.refresh(subscription)
@@ -2005,7 +2034,7 @@ async def purchase_tariff(
                     reset_reason='покупка тарифа (cabinet)',
                 )
         except Exception as remnawave_error:
-            logger.error(f'Failed to sync subscription with RemnaWave: {remnawave_error}')
+            logger.error('Failed to sync subscription with RemnaWave', remnawave_error=remnawave_error)
 
         # Save cart for auto-renewal (not for daily tariffs - they have their own charging)
         if not is_daily_tariff:
@@ -2019,9 +2048,9 @@ async def purchase_tariff(
                     'description': f'Продление тарифа {tariff.name} на {period_days} дней',
                 }
                 await user_cart_service.save_user_cart(user.id, cart_data)
-                logger.info(f'Tariff cart saved for auto-renewal (cabinet) user {user.id}')
+                logger.info('Tariff cart saved for auto-renewal (cabinet) user', user_id=user.id)
             except Exception as e:
-                logger.error(f'Error saving tariff cart (cabinet): {e}')
+                logger.error('Error saving tariff cart (cabinet)', error=e)
 
         await db.refresh(user)
 
@@ -2059,7 +2088,7 @@ async def purchase_tariff(
             try:
                 # Determine if this is a new subscription or extension
                 was_new_subscription = (
-                    subscription.start_date and (datetime.utcnow() - subscription.start_date).total_seconds() < 60
+                    subscription.start_date and (datetime.now(UTC) - subscription.start_date).total_seconds() < 60
                 )
                 notification_type = (
                     NotificationType.SUBSCRIPTION_ACTIVATED
@@ -2081,7 +2110,7 @@ async def purchase_tariff(
                     bot=None,
                 )
             except Exception as notif_error:
-                logger.warning(f'Failed to send subscription notification to {user.email}: {notif_error}')
+                logger.warning('Failed to send subscription notification to', email=user.email, notif_error=notif_error)
 
         # Отправляем уведомление админам о покупке/продлении тарифа
         try:
@@ -2095,7 +2124,7 @@ async def purchase_tariff(
                     notification_service = AdminNotificationService(bot)
                     # Определяем тип покупки: новая подписка или продление
                     was_new_subscription = (
-                        subscription.start_date and (datetime.utcnow() - subscription.start_date).total_seconds() < 60
+                        subscription.start_date and (datetime.now(UTC) - subscription.start_date).total_seconds() < 60
                     )
                     await notification_service.send_subscription_purchase_notification(
                         db=db,
@@ -2110,14 +2139,14 @@ async def purchase_tariff(
                 finally:
                     await bot.session.close()
         except Exception as e:
-            logger.error(f'Failed to send admin notification for tariff purchase: {e}')
+            logger.error('Failed to send admin notification for tariff purchase', error=e)
 
         return response
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f'Failed to purchase tariff for user {user.id}: {e}')
+        logger.error('Failed to purchase tariff for user', user_id=user.id, error=e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail='Failed to process tariff purchase',
@@ -2182,7 +2211,7 @@ async def purchase_devices(
             )
 
         # Calculate prorated price based on remaining days
-        from datetime import datetime
+        from datetime import UTC, datetime
 
         now = datetime.now(UTC)
         end_date = subscription.end_date
@@ -2224,11 +2253,13 @@ async def purchase_devices(
                 }
                 await user_cart_service.save_user_cart(user.id, cart_data)
                 logger.info(
-                    f'Cart saved for device purchase (cabinet) user {user.id}: '
-                    f'+{request.devices} devices, discount {devices_discount_percent}%'
+                    'Cart saved for device purchase (cabinet) user + devices, discount',
+                    user_id=user.id,
+                    devices=request.devices,
+                    devices_discount_percent=devices_discount_percent,
                 )
             except Exception as e:
-                logger.error(f'Error saving cart for device purchase (cabinet): {e}')
+                logger.error('Error saving cart for device purchase (cabinet)', error=e)
 
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
@@ -2274,17 +2305,23 @@ async def purchase_devices(
             else:
                 await service.create_remnawave_user(db, subscription)
         except Exception as e:
-            logger.error(f'Failed to sync devices with RemnaWave: {e}')
+            logger.error('Failed to sync devices with RemnaWave', error=e)
 
         await db.refresh(user)
 
         if devices_discount_percent > 0:
             logger.info(
-                f'User {user.id} purchased {request.devices} devices for {price_kopeks} kopeks '
-                f'(discount {devices_discount_percent}%, saved {discount_value} kopeks)'
+                'User purchased devices for kopeks (discount saved kopeks)',
+                user_id=user.id,
+                devices=request.devices,
+                price_kopeks=price_kopeks,
+                devices_discount_percent=devices_discount_percent,
+                discount_value=discount_value,
             )
         else:
-            logger.info(f'User {user.id} purchased {request.devices} devices for {price_kopeks} kopeks')
+            logger.info(
+                'User purchased devices for kopeks', user_id=user.id, devices=request.devices, price_kopeks=price_kopeks
+            )
 
         # Отправляем уведомление админам
         try:
@@ -2308,7 +2345,7 @@ async def purchase_devices(
                 finally:
                     await bot.session.close()
         except Exception as e:
-            logger.error(f'Failed to send admin notification for device purchase: {e}')
+            logger.error('Failed to send admin notification for device purchase', error=e)
 
         response = {
             'success': True,
@@ -2331,7 +2368,7 @@ async def purchase_devices(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f'Failed to purchase devices for user {user.id}: {e}')
+        logger.error('Failed to purchase devices for user', user_id=user.id, error=e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail='Не удалось обработать покупку устройств',
@@ -2449,7 +2486,7 @@ async def save_traffic_cart(
         'description': f'Докупка {request.gb} ГБ трафика',
     }
     await user_cart_service.save_user_cart(user.id, cart_data)
-    logger.info(f'Cart saved for traffic purchase (cabinet save-cart) user {user.id}: +{request.gb} GB')
+    logger.info('Cart saved for traffic purchase (cabinet save-cart) user +', user_id=user.id, gb=request.gb)
 
     return {'success': True, 'cart_saved': True}
 
@@ -2524,7 +2561,9 @@ async def save_devices_cart(
         'source': 'cabinet',
     }
     await user_cart_service.save_user_cart(user.id, cart_data)
-    logger.info(f'Cart saved for device purchase (cabinet save-cart) user {user.id}: +{request.devices} devices')
+    logger.info(
+        'Cart saved for device purchase (cabinet save-cart) user + devices', user_id=user.id, devices=request.devices
+    )
 
     return {'success': True, 'cart_saved': True}
 
@@ -2588,7 +2627,7 @@ async def get_device_price(
         }
 
     # Calculate prorated price
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     now = datetime.now(UTC)
     end_date = subscription.end_date
@@ -2650,7 +2689,7 @@ def _load_app_config_from_file() -> dict[str, Any]:
             if isinstance(data, dict):
                 return data
     except Exception as e:
-        logger.error(f'Failed to load app-config.json: {e}')
+        logger.error('Failed to load app-config.json', error=e)
     return {}
 
 
@@ -2793,10 +2832,11 @@ def _get_url_scheme_for_app(app: dict[str, Any]) -> tuple[str, bool]:
 
     # No scheme found
     logger.debug(
-        f"_get_url_scheme_for_app: No scheme found for app '{app.get('name')}', "
-        f'has blocks: {bool(app.get("blocks"))}, '
-        f'has buttons: {bool(app.get("buttons"))}, '
-        f'has urlScheme: {bool(app.get("urlScheme"))}'
+        '_get_url_scheme_for_app: No scheme found for app has blocks: has buttons: has urlScheme',
+        get=app.get('name'),
+        get_2=bool(app.get('blocks')),
+        get_3=bool(app.get('buttons')),
+        get_4=bool(app.get('urlScheme')),
     )
     return '', False
 
@@ -2842,7 +2882,7 @@ def _convert_remnawave_app_to_cabinet(app: dict[str, Any]) -> dict[str, Any]:
     # Debug log for conversion (не логируем отсутствие urlScheme - для Happ это нормально)
     app_name = app.get('name', 'unknown')
     if url_scheme:
-        logger.debug(f"_convert_remnawave_app_to_cabinet: app '{app_name}' -> urlScheme='{url_scheme}'")
+        logger.debug('_convert_remnawave_app_to_cabinet: app urlScheme', app_name=app_name, url_scheme=url_scheme)
 
     # Smart block mapping: find blocks by their content, not just position
     # 1. First block is usually installation
@@ -2951,12 +2991,12 @@ async def _load_app_config_async() -> dict[str, Any]:
             async with service.get_api_client() as api:
                 config = await api.get_subscription_page_config(remnawave_uuid)
                 if config and config.config:
-                    logger.debug(f'Loaded app config from RemnaWave: {remnawave_uuid}')
+                    logger.debug('Loaded app config from RemnaWave', remnawave_uuid=remnawave_uuid)
                     raw = dict(config.config)
                     raw['_isRemnawave'] = True
                     return raw
         except Exception as e:
-            logger.warning(f'Failed to load RemnaWave config, falling back to file: {e}')
+            logger.warning('Failed to load RemnaWave config, falling back to file', error=e)
 
     # Fallback to local file
     return _load_app_config_from_file()
@@ -2987,21 +3027,21 @@ def _create_deep_link(
 
     scheme, uses_crypto = _get_url_scheme_for_app(app)
     if not scheme:
-        logger.debug(f"_create_deep_link: no urlScheme for app '{app.get('name', 'unknown')}'")
+        logger.debug('_create_deep_link: no urlScheme for app', get=app.get('name', 'unknown'))
         return None
 
     # Pick the correct payload based on which template the app uses
     if uses_crypto:
         if not subscription_crypto_link:
             logger.debug(
-                f"_create_deep_link: app '{app.get('name', 'unknown')}' requires crypto link but none available"
+                '_create_deep_link: app requires crypto link but none available', get=app.get('name', 'unknown')
             )
             return None
         payload = subscription_crypto_link
     else:
         if not subscription_url:
             logger.debug(
-                f"_create_deep_link: app '{app.get('name', 'unknown')}' requires subscription_url but none available"
+                '_create_deep_link: app requires subscription_url but none available', get=app.get('name', 'unknown')
             )
             return None
         payload = subscription_url
@@ -3010,7 +3050,7 @@ def _create_deep_link(
         try:
             payload = base64.b64encode(payload.encode('utf-8')).decode('utf-8')
         except Exception as e:
-            logger.warning(f'Failed to encode payload to base64: {e}')
+            logger.warning('Failed to encode payload to base64', error=e)
 
     return f'{scheme}{payload}'
 
@@ -3039,9 +3079,9 @@ async def get_available_countries(
         connected_squads = user.subscription.connected_squads or []
         # Calculate days left for prorated pricing
         if user.subscription.end_date:
-            from datetime import datetime
+            from datetime import UTC, datetime
 
-            delta = user.subscription.end_date - datetime.utcnow()
+            delta = user.subscription.end_date - datetime.now(UTC)
             days_left = max(0, delta.days)
 
     # Get discount from promo group
@@ -3219,11 +3259,11 @@ async def update_countries(
             try:
                 await add_user_to_servers(db, added_server_ids)
             except Exception as e:
-                logger.error(f'Ошибка обновления счётчика серверов: {e}')
+                logger.error('Ошибка обновления счётчика серверов', error=e)
 
     # Update connected squads
     user.subscription.connected_squads = selected_countries
-    user.subscription.updated_at = datetime.utcnow()
+    user.subscription.updated_at = datetime.now(UTC)
     await db.commit()
 
     # Sync with RemnaWave
@@ -3234,7 +3274,7 @@ async def update_countries(
         else:
             await subscription_service.create_remnawave_user(db, user.subscription)
     except Exception as e:
-        logger.error(f'Failed to sync countries with RemnaWave: {e}')
+        logger.error('Failed to sync countries with RemnaWave', error=e)
 
     await db.refresh(user.subscription)
 
@@ -3569,7 +3609,7 @@ async def get_devices(
             }
 
     except Exception as e:
-        logger.error(f'Error fetching devices: {e}')
+        logger.error('Error fetching devices', error=e)
         return {
             'devices': [],
             'total': 0,
@@ -3613,7 +3653,7 @@ async def delete_device(
             }
 
     except Exception as e:
-        logger.error(f'Error deleting device: {e}')
+        logger.error('Error deleting device', error=e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail='Failed to delete device',
@@ -3672,7 +3712,7 @@ async def delete_all_devices(
                         await api._make_request('POST', '/api/hwid/devices/delete', data=delete_data)
                         deleted_count += 1
                     except Exception as device_error:
-                        logger.error(f'Error deleting device {device_hwid}: {device_error}')
+                        logger.error('Error deleting device', device_hwid=device_hwid, device_error=device_error)
 
             return {
                 'success': True,
@@ -3681,7 +3721,7 @@ async def delete_all_devices(
             }
 
     except Exception as e:
-        logger.error(f'Error deleting all devices: {e}')
+        logger.error('Error deleting all devices', error=e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail='Failed to delete devices',
@@ -3755,7 +3795,7 @@ async def get_device_reduction_info(
                 if response and 'response' in response:
                     connected_devices_count = response['response'].get('total', 0)
         except Exception as e:
-            logger.error(f'Error getting connected devices count: {e}')
+            logger.error('Error getting connected devices count', error=e)
 
     can_reduce = current_device_limit - min_device_limit
 
@@ -3839,8 +3879,11 @@ async def reduce_devices(
                     if connected_devices_count > new_device_limit:
                         devices_to_remove = connected_devices_count - new_device_limit
                         logger.info(
-                            f'Removing {devices_to_remove} excess devices for user {user.id}: '
-                            f'had {connected_devices_count}, new limit {new_device_limit}'
+                            'Removing excess devices for user had new limit',
+                            devices_to_remove=devices_to_remove,
+                            user_id=user.id,
+                            connected_devices_count=connected_devices_count,
+                            new_device_limit=new_device_limit,
                         )
 
                         # Sort by date (oldest first) and remove the last ones
@@ -3857,17 +3900,17 @@ async def reduce_devices(
                                     delete_data = {'userUuid': user.remnawave_uuid, 'hwid': device_hwid}
                                     await api._make_request('POST', '/api/hwid/devices/delete', data=delete_data)
                                     devices_removed_count += 1
-                                    logger.info(f'Removed device {device_hwid} for user {user.id}')
+                                    logger.info('Removed device for user', device_hwid=device_hwid, user_id=user.id)
                                 except Exception as del_error:
-                                    logger.error(f'Error removing device {device_hwid}: {del_error}')
+                                    logger.error('Error removing device', device_hwid=device_hwid, del_error=del_error)
         except Exception as e:
-            logger.error(f'Error checking/removing devices: {e}')
+            logger.error('Error checking/removing devices', error=e)
 
     old_device_limit = current_device_limit
 
     # Update subscription
     subscription.device_limit = new_device_limit
-    subscription.updated_at = datetime.utcnow()
+    subscription.updated_at = datetime.now(UTC)
     await db.commit()
 
     # Update RemnaWave
@@ -3875,7 +3918,7 @@ async def reduce_devices(
         subscription_service = SubscriptionService()
         await subscription_service.update_remnawave_user(db, subscription)
     except Exception as e:
-        logger.error(f'Error updating RemnaWave user: {e}')
+        logger.error('Error updating RemnaWave user', error=e)
 
     logger.info(
         f'User {user.id} reduced device limit from {old_device_limit} to {new_device_limit}'
@@ -3967,8 +4010,8 @@ async def preview_tariff_switch(
 
     # Calculate remaining days
     remaining_days = 0
-    if user.subscription.end_date and user.subscription.end_date > datetime.utcnow():
-        delta = user.subscription.end_date - datetime.utcnow()
+    if user.subscription.end_date and user.subscription.end_date > datetime.now(UTC):
+        delta = user.subscription.end_date - datetime.now(UTC)
         remaining_days = max(0, delta.days)
 
     # Calculate switch cost
@@ -4085,7 +4128,7 @@ async def switch_tariff(
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> dict[str, Any]:
     """Switch to a different tariff without changing end date."""
-    from datetime import timedelta
+    from datetime import UTC, timedelta
 
     if not settings.is_tariffs_mode():
         raise HTTPException(
@@ -4152,8 +4195,8 @@ async def switch_tariff(
 
     # Calculate remaining days
     remaining_days = 0
-    if user.subscription.end_date and user.subscription.end_date > datetime.utcnow():
-        delta = user.subscription.end_date - datetime.utcnow()
+    if user.subscription.end_date and user.subscription.end_date > datetime.now(UTC):
+        delta = user.subscription.end_date - datetime.now(UTC)
         remaining_days = max(0, delta.days)
 
     # Calculate cost
@@ -4291,14 +4334,14 @@ async def switch_tariff(
 
     if switching_to_daily:
         # Switching TO daily - reset end_date to 1 day, set last_daily_charge_at
-        user.subscription.end_date = datetime.utcnow() + timedelta(days=1)
-        user.subscription.last_daily_charge_at = datetime.utcnow()
+        user.subscription.end_date = datetime.now(UTC) + timedelta(days=1)
+        user.subscription.last_daily_charge_at = datetime.now(UTC)
         user.subscription.is_daily_paused = False
     elif switching_from_daily:
-        user.subscription.end_date = datetime.utcnow() + timedelta(days=new_period_days)
+        user.subscription.end_date = datetime.now(UTC) + timedelta(days=new_period_days)
         user.subscription.is_daily_paused = False
 
-    user.subscription.updated_at = datetime.utcnow()
+    user.subscription.updated_at = datetime.now(UTC)
     await db.commit()
 
     # Sync with RemnaWave
@@ -4309,7 +4352,7 @@ async def switch_tariff(
         else:
             await subscription_service.create_remnawave_user(db, user.subscription)
     except Exception as e:
-        logger.error(f'Failed to sync tariff switch with RemnaWave: {e}')
+        logger.error('Failed to sync tariff switch with RemnaWave', error=e)
 
     # Reset all devices on tariff switch
     devices_reset = False
@@ -4319,9 +4362,9 @@ async def switch_tariff(
             async with service.get_api_client() as api:
                 await api.reset_user_devices(user.remnawave_uuid)
                 devices_reset = True
-                logger.info(f'Reset all devices for user {user.id} on tariff switch')
+                logger.info('Reset all devices for user on tariff switch', user_id=user.id)
         except Exception as e:
-            logger.error(f'Failed to reset devices on tariff switch: {e}')
+            logger.error('Failed to reset devices on tariff switch', error=e)
 
     await db.refresh(user)
     await db.refresh(user.subscription)
@@ -4349,7 +4392,7 @@ async def switch_tariff(
             finally:
                 await bot.session.close()
     except Exception as e:
-        logger.error(f'Failed to send admin notification for tariff switch: {e}')
+        logger.error('Failed to send admin notification for tariff switch', error=e)
 
     response = {
         'success': True,
@@ -4382,7 +4425,7 @@ async def toggle_subscription_pause(
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> dict[str, Any]:
     """Toggle pause/resume for daily subscription."""
-    from datetime import timedelta
+    from datetime import UTC, timedelta
 
     await db.refresh(user, ['subscription'])
 
@@ -4433,8 +4476,8 @@ async def toggle_subscription_pause(
         # Restore ACTIVE status if was DISABLED
         if was_disabled:
             user.subscription.status = SubscriptionStatus.ACTIVE.value
-            user.subscription.last_daily_charge_at = datetime.utcnow()
-            user.subscription.end_date = datetime.utcnow() + timedelta(days=1)
+            user.subscription.last_daily_charge_at = datetime.now(UTC)
+            user.subscription.end_date = datetime.now(UTC) + timedelta(days=1)
 
     await db.commit()
     await db.refresh(user.subscription)
@@ -4448,7 +4491,7 @@ async def toggle_subscription_pause(
             subscription_service = SubscriptionService()
             await subscription_service.enable_remnawave_user(user.remnawave_uuid)
         except Exception as e:
-            logger.error(f'Error enabling RemnaWave user on resume: {e}')
+            logger.error('Error enabling RemnaWave user on resume', error=e)
 
     if new_paused_state:
         message = 'Daily subscription paused'
@@ -4571,7 +4614,7 @@ async def switch_traffic_package(
     user.subscription.traffic_limit_gb = new_traffic
     user.subscription.purchased_traffic_gb = 0  # Reset purchased traffic on switch
     user.subscription.traffic_reset_at = None  # Reset traffic reset date
-    user.subscription.updated_at = datetime.utcnow()
+    user.subscription.updated_at = datetime.now(UTC)
     await db.commit()
 
     # Sync with RemnaWave
@@ -4582,7 +4625,7 @@ async def switch_traffic_package(
         else:
             await subscription_service.create_remnawave_user(db, user.subscription)
     except Exception as e:
-        logger.error(f'Failed to sync traffic switch with RemnaWave: {e}')
+        logger.error('Failed to sync traffic switch with RemnaWave', error=e)
 
     await db.refresh(user)
     await db.refresh(user.subscription)
@@ -4690,7 +4733,7 @@ async def refresh_traffic(
         used_gb = traffic_stats.get('used_traffic_gb', 0)
         if abs((user.subscription.traffic_used_gb or 0) - used_gb) > 0.01:
             user.subscription.traffic_used_gb = used_gb
-            user.subscription.updated_at = datetime.utcnow()
+            user.subscription.updated_at = datetime.now(UTC)
             await db.commit()
 
         # Calculate percentage
@@ -4723,7 +4766,7 @@ async def refresh_traffic(
         }
 
     except Exception as e:
-        logger.error(f'Error refreshing traffic for user {user.id}: {e}')
+        logger.error('Error refreshing traffic for user', user_id=user.id, error=e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail='Failed to refresh traffic data',

@@ -1,14 +1,14 @@
 import asyncio
-import logging
 import time
 
+import structlog
 from aiogram import Bot, Dispatcher, F, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InaccessibleMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.database.crud.ticket import TicketCRUD, TicketMessageCRUD
 from app.database.crud.user import get_user_by_id
 from app.database.models import Ticket, TicketStatus, User
@@ -25,7 +25,7 @@ from app.utils.photo_message import edit_or_answer_photo
 from app.utils.timezone import format_local_datetime
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class TicketStates(StatesGroup):
@@ -63,12 +63,20 @@ async def show_ticket_priority_selection(
         )
         return
 
-    await callback.message.edit_text(
-        texts.t('TICKET_TITLE_INPUT', 'Введите заголовок тикета:'),
-        reply_markup=get_ticket_cancel_keyboard(db_user.language),
-    )
+    prompt_text = texts.t('TICKET_TITLE_INPUT', 'Введите заголовок тикета:')
+    cancel_kb = get_ticket_cancel_keyboard(db_user.language)
+    prompt_msg = callback.message
+    try:
+        await callback.message.edit_text(prompt_text, reply_markup=cancel_kb)
+    except TelegramBadRequest:
+        # Предыдущее сообщение — фото (нет текста для edit_text), удаляем и шлём новое
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        prompt_msg = await callback.message.answer(prompt_text, reply_markup=cancel_kb)
     # Запоминаем исходное сообщение бота, чтобы далее редактировать его, а не слать новые
-    await state.update_data(prompt_chat_id=callback.message.chat.id, prompt_message_id=callback.message.message_id)
+    await state.update_data(prompt_chat_id=prompt_msg.chat.id, prompt_message_id=prompt_msg.message_id)
     await state.set_state(TicketStates.waiting_for_title)
     await callback.answer()
 
@@ -92,58 +100,18 @@ async def handle_ticket_title_input(message: types.Message, state: FSMContext, d
     asyncio.create_task(_try_delete_message_later(message.bot, message.chat.id, message.message_id, 2.0))
     if len(title) < 5:
         texts = get_texts(db_user.language)
-        if prompt_chat_id and prompt_message_id:
-            text_val = texts.t(
-                'TICKET_TITLE_TOO_SHORT', 'Заголовок должен содержать минимум 5 символов. Попробуйте еще раз:'
-            )
-            if settings.ENABLE_LOGO_MODE:
-                await message.bot.edit_message_caption(
-                    chat_id=prompt_chat_id,
-                    message_id=prompt_message_id,
-                    caption=text_val,
-                    reply_markup=get_ticket_cancel_keyboard(db_user.language),
-                    parse_mode=None,
-                )
-            else:
-                await message.bot.edit_message_text(
-                    chat_id=prompt_chat_id,
-                    message_id=prompt_message_id,
-                    text=text_val,
-                    reply_markup=get_ticket_cancel_keyboard(db_user.language),
-                )
-        else:
-            await message.answer(
-                texts.t('TICKET_TITLE_TOO_SHORT', 'Заголовок должен содержать минимум 5 символов. Попробуйте еще раз:')
-            )
+        text_val = texts.t(
+            'TICKET_TITLE_TOO_SHORT', 'Заголовок должен содержать минимум 5 символов. Попробуйте еще раз:'
+        )
+        await _edit_or_send(message, prompt_chat_id, prompt_message_id, text_val, db_user.language)
         return
 
     if len(title) > 255:
         texts = get_texts(db_user.language)
-        if prompt_chat_id and prompt_message_id:
-            text_val = texts.t(
-                'TICKET_TITLE_TOO_LONG', 'Заголовок слишком длинный. Максимум 255 символов. Попробуйте еще раз:'
-            )
-            if settings.ENABLE_LOGO_MODE:
-                await message.bot.edit_message_caption(
-                    chat_id=prompt_chat_id,
-                    message_id=prompt_message_id,
-                    caption=text_val,
-                    reply_markup=get_ticket_cancel_keyboard(db_user.language),
-                    parse_mode=None,
-                )
-            else:
-                await message.bot.edit_message_text(
-                    chat_id=prompt_chat_id,
-                    message_id=prompt_message_id,
-                    text=text_val,
-                    reply_markup=get_ticket_cancel_keyboard(db_user.language),
-                )
-        else:
-            await message.answer(
-                texts.t(
-                    'TICKET_TITLE_TOO_LONG', 'Заголовок слишком длинный. Максимум 255 символов. Попробуйте еще раз:'
-                )
-            )
+        text_val = texts.t(
+            'TICKET_TITLE_TOO_LONG', 'Заголовок слишком длинный. Максимум 255 символов. Попробуйте еще раз:'
+        )
+        await _edit_or_send(message, prompt_chat_id, prompt_message_id, text_val, db_user.language)
         return
 
     # Глобальный блок
@@ -166,29 +134,8 @@ async def handle_ticket_title_input(message: types.Message, state: FSMContext, d
     await state.update_data(title=title)
 
     texts = get_texts(db_user.language)
-
-    if prompt_chat_id and prompt_message_id:
-        text_val = texts.t('TICKET_MESSAGE_INPUT', 'Опишите проблему (до 500 символов) или отправьте фото с подписью:')
-        if settings.ENABLE_LOGO_MODE:
-            await message.bot.edit_message_caption(
-                chat_id=prompt_chat_id,
-                message_id=prompt_message_id,
-                caption=text_val,
-                reply_markup=get_ticket_cancel_keyboard(db_user.language),
-                parse_mode=None,
-            )
-        else:
-            await message.bot.edit_message_text(
-                chat_id=prompt_chat_id,
-                message_id=prompt_message_id,
-                text=text_val,
-                reply_markup=get_ticket_cancel_keyboard(db_user.language),
-            )
-    else:
-        await message.answer(
-            texts.t('TICKET_MESSAGE_INPUT', 'Опишите проблему (до 500 символов) или отправьте фото с подписью:'),
-            reply_markup=get_ticket_cancel_keyboard(db_user.language),
-        )
+    text_val = texts.t('TICKET_MESSAGE_INPUT', 'Опишите проблему (до 500 символов) или отправьте фото с подписью:')
+    await _edit_or_send(message, prompt_chat_id, prompt_message_id, text_val, db_user.language)
 
     await state.set_state(TicketStates.waiting_for_message)
 
@@ -263,12 +210,10 @@ async def handle_ticket_message_input(message: types.Message, state: FSMContext,
             )
         )
         if prompt_chat_id and prompt_message_id:
-            if settings.ENABLE_LOGO_MODE:
-                await message.bot.edit_message_caption(
-                    chat_id=prompt_chat_id, message_id=prompt_message_id, caption=text_msg, parse_mode=None
-                )
-            else:
+            try:
                 await message.bot.edit_message_text(chat_id=prompt_chat_id, message_id=prompt_message_id, text=text_msg)
+            except TelegramBadRequest:
+                await message.answer(text_msg)
         else:
             await message.answer(text_msg)
         await state.clear()
@@ -285,24 +230,7 @@ async def handle_ticket_message_input(message: types.Message, state: FSMContext,
         err_text = texts.t(
             'TICKET_MESSAGE_TOO_SHORT', 'Сообщение слишком короткое. Опишите проблему подробнее или отправьте фото:'
         )
-        if prompt_chat_id and prompt_message_id:
-            if settings.ENABLE_LOGO_MODE:
-                await message.bot.edit_message_caption(
-                    chat_id=prompt_chat_id,
-                    message_id=prompt_message_id,
-                    caption=err_text,
-                    reply_markup=get_ticket_cancel_keyboard(db_user.language),
-                    parse_mode=None,
-                )
-            else:
-                await message.bot.edit_message_text(
-                    chat_id=prompt_chat_id,
-                    message_id=prompt_message_id,
-                    text=err_text,
-                    reply_markup=get_ticket_cancel_keyboard(db_user.language),
-                )
-        else:
-            await message.answer(err_text)
+        await _edit_or_send(message, prompt_chat_id, prompt_message_id, err_text, db_user.language)
         return
 
     data = await state.get_data()
@@ -356,15 +284,7 @@ async def handle_ticket_message_input(message: types.Message, state: FSMContext,
             ]
         )
         if prompt_chat_id and prompt_message_id:
-            if settings.ENABLE_LOGO_MODE:
-                await message.bot.edit_message_caption(
-                    chat_id=prompt_chat_id,
-                    message_id=prompt_message_id,
-                    caption=creation_text,
-                    reply_markup=keyboard,
-                    parse_mode='HTML',
-                )
-            else:
+            try:
                 await message.bot.edit_message_text(
                     chat_id=prompt_chat_id,
                     message_id=prompt_message_id,
@@ -372,6 +292,8 @@ async def handle_ticket_message_input(message: types.Message, state: FSMContext,
                     reply_markup=keyboard,
                     parse_mode='HTML',
                 )
+            except TelegramBadRequest:
+                await message.answer(creation_text, reply_markup=keyboard, parse_mode='HTML')
         else:
             await message.answer(creation_text, reply_markup=keyboard, parse_mode='HTML')
 
@@ -381,7 +303,7 @@ async def handle_ticket_message_input(message: types.Message, state: FSMContext,
         await notify_admins_about_new_ticket(ticket, db)
 
     except Exception as e:
-        logger.error(f'Error creating ticket: {e}')
+        logger.error('Error creating ticket', error=e)
         texts = get_texts(db_user.language)
         await message.answer(
             texts.t('TICKET_CREATE_ERROR', '❌ Произошла ошибка при создании тикета. Попробуйте позже.')
@@ -765,6 +687,28 @@ async def user_delete_message(callback: types.CallbackQuery):
     await callback.answer('✅')
 
 
+async def _edit_or_send(
+    message: types.Message,
+    chat_id: int | None,
+    message_id: int | None,
+    text: str,
+    language: str,
+) -> None:
+    """Попытаться отредактировать prompt-сообщение, при неудаче — отправить новое."""
+    if chat_id and message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=get_ticket_cancel_keyboard(language),
+            )
+            return
+        except TelegramBadRequest:
+            pass
+    await message.answer(text, reply_markup=get_ticket_cancel_keyboard(language))
+
+
 async def _try_delete_message_later(bot: Bot, chat_id: int, message_id: int, delay_seconds: float = 1.0):
     try:
         await asyncio.sleep(delay_seconds)
@@ -782,10 +726,20 @@ async def reply_to_ticket(callback: types.CallbackQuery, state: FSMContext, db_u
 
     texts = get_texts(db_user.language)
 
-    await callback.message.edit_text(
-        texts.t('TICKET_REPLY_INPUT', 'Введите ваш ответ:'),
-        reply_markup=get_ticket_reply_cancel_keyboard(db_user.language),
-    )
+    try:
+        await callback.message.edit_text(
+            texts.t('TICKET_REPLY_INPUT', 'Введите ваш ответ:'),
+            reply_markup=get_ticket_reply_cancel_keyboard(db_user.language),
+        )
+    except TelegramBadRequest:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(
+            texts.t('TICKET_REPLY_INPUT', 'Введите ваш ответ:'),
+            reply_markup=get_ticket_reply_cancel_keyboard(db_user.language),
+        )
 
     await state.set_state(TicketStates.waiting_for_reply)
     await callback.answer()
@@ -935,11 +889,11 @@ async def handle_ticket_reply(message: types.Message, state: FSMContext, db_user
         await state.clear()
 
         # Уведомить админов об ответе пользователя
-        logger.info(f'Attempting to notify admins about ticket reply #{ticket_id}')
+        logger.info('Attempting to notify admins about ticket reply #', ticket_id=ticket_id)
         await notify_admins_about_ticket_reply(ticket, reply_text, db)
 
     except Exception as e:
-        logger.error(f'Error adding ticket reply: {e}')
+        logger.error('Error adding ticket reply', error=e)
         texts = get_texts(db_user.language)
         await message.answer(
             texts.t('TICKET_REPLY_ERROR', '❌ Произошла ошибка при отправке ответа. Попробуйте позже.')
@@ -974,7 +928,7 @@ async def close_ticket(callback: types.CallbackQuery, db_user: User, db: AsyncSe
             await callback.answer(texts.t('TICKET_CLOSE_ERROR', '❌ Ошибка при закрытии тикета.'), show_alert=True)
 
     except Exception as e:
-        logger.error(f'Error closing ticket: {e}')
+        logger.error('Error closing ticket', error=e)
         texts = get_texts(db_user.language)
         await callback.answer(texts.t('TICKET_CLOSE_ERROR', '❌ Ошибка при закрытии тикета.'), show_alert=True)
 
@@ -1036,7 +990,9 @@ async def notify_admins_about_new_ticket(ticket: Ticket, db: AsyncSession):
         from app.config import settings
 
         if not settings.is_admin_notifications_enabled():
-            logger.info(f'Admin notifications disabled. Ticket #{ticket.id} created by user {ticket.user_id}')
+            logger.info(
+                'Admin notifications disabled. Ticket # created by user', ticket_id=ticket.id, user_id=ticket.user_id
+            )
             return
 
         # Получаем язык пользователя для локализации заголовков в уведомлении
@@ -1079,17 +1035,17 @@ async def notify_admins_about_new_ticket(ticket: Ticket, db: AsyncSession):
         service = AdminNotificationService(bot)
         await service.send_ticket_event_notification(notification_text, None)
     except Exception as e:
-        logger.error(f'Error notifying admins about new ticket: {e}')
+        logger.error('Error notifying admins about new ticket', error=e)
 
 
 async def notify_admins_about_ticket_reply(ticket: Ticket, reply_text: str, db: AsyncSession):
     """Уведомить админов об ответе пользователя на тикет"""
-    logger.info(f'notify_admins_about_ticket_reply called for ticket #{ticket.id}')
+    logger.info('notify_admins_about_ticket_reply called for ticket #', ticket_id=ticket.id)
     try:
         from app.config import settings
 
         if not settings.is_admin_notifications_enabled():
-            logger.info(f'Admin notifications disabled. Reply to ticket #{ticket.id}')
+            logger.info('Admin notifications disabled. Reply to ticket #', ticket_id=ticket.id)
             return
 
         title = (ticket.title or '').strip()
@@ -1127,9 +1083,9 @@ async def notify_admins_about_ticket_reply(ticket: Ticket, reply_text: str, db: 
 
         service = AdminNotificationService(bot)
         result = await service.send_ticket_event_notification(notification_text, None)
-        logger.info(f'Ticket #{ticket.id} reply notification sent: {result}')
+        logger.info('Ticket # reply notification sent', ticket_id=ticket.id, result=result)
     except Exception as e:
-        logger.error(f'Error notifying admins about ticket reply: {e}')
+        logger.error('Error notifying admins about ticket reply', error=e)
 
 
 def register_handlers(dp: Dispatcher):

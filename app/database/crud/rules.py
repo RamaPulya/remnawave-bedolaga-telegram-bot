@@ -1,13 +1,13 @@
-import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import ServiceRule
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def get_rules_by_language(db: AsyncSession, language: str = 'ru') -> ServiceRule | None:
@@ -30,7 +30,7 @@ async def create_or_update_rules(
 
     for rule in existing_rules:
         rule.is_active = False
-        rule.updated_at = datetime.utcnow()
+        rule.updated_at = datetime.now(UTC)
 
     new_rules = ServiceRule(title=title, content=content, language=language, is_active=True, order=0)
 
@@ -38,7 +38,7 @@ async def create_or_update_rules(
     await db.commit()
     await db.refresh(new_rules)
 
-    logger.info(f'✅ Правила для языка {language} обновлены (ID: {new_rules.id})')
+    logger.info('✅ Правила для языка обновлены (ID: )', language=language, new_rules_id=new_rules.id)
     return new_rules
 
 
@@ -47,18 +47,20 @@ async def clear_all_rules(db: AsyncSession, language: str = 'ru') -> bool:
         result = await db.execute(
             update(ServiceRule)
             .where(ServiceRule.language == language, ServiceRule.is_active == True)
-            .values(is_active=False, updated_at=datetime.utcnow())
+            .values(is_active=False, updated_at=datetime.now(UTC))
         )
 
         await db.commit()
 
         rows_affected = result.rowcount
-        logger.info(f'✅ Очищены правила для языка {language}. Деактивировано записей: {rows_affected}')
+        logger.info(
+            '✅ Очищены правила для языка . Деактивировано записей', language=language, rows_affected=rows_affected
+        )
 
         return rows_affected > 0
 
     except Exception as e:
-        logger.error(f'❌ Ошибка при очистке правил для языка {language}: {e}')
+        logger.error('❌ Ошибка при очистке правил для языка', language=language, error=e)
         await db.rollback()
         raise
 
@@ -102,13 +104,13 @@ async def restore_rules_version(db: AsyncSession, rule_id: int, language: str = 
         rule_to_restore = result.scalar_one_or_none()
 
         if not rule_to_restore:
-            logger.warning(f'Правило с ID {rule_id} не найдено для языка {language}')
+            logger.warning('Правило с ID не найдено для языка', rule_id=rule_id, language=language)
             return None
 
         await db.execute(
             update(ServiceRule)
             .where(ServiceRule.language == language, ServiceRule.is_active == True)
-            .values(is_active=False, updated_at=datetime.utcnow())
+            .values(is_active=False, updated_at=datetime.now(UTC))
         )
 
         restored_rule = ServiceRule(
@@ -119,11 +121,13 @@ async def restore_rules_version(db: AsyncSession, rule_id: int, language: str = 
         await db.commit()
         await db.refresh(restored_rule)
 
-        logger.info(f'✅ Восстановлена версия правил ID {rule_id} как новое правило ID {restored_rule.id}')
+        logger.info(
+            '✅ Восстановлена версия правил ID как новое правило ID', rule_id=rule_id, restored_rule_id=restored_rule.id
+        )
         return restored_rule
 
     except Exception as e:
-        logger.error(f'❌ Ошибка при восстановлении правил ID {rule_id}: {e}')
+        logger.error('❌ Ошибка при восстановлении правил ID', rule_id=rule_id, error=e)
         await db.rollback()
         raise
 
@@ -156,5 +160,5 @@ async def get_rules_statistics(db: AsyncSession) -> dict:
         }
 
     except Exception as e:
-        logger.error(f'❌ Ошибка при получении статистики правил: {e}')
+        logger.error('❌ Ошибка при получении статистики правил', error=e)
         return {'total_active': 0, 'total_all_time': 0, 'languages': {}, 'total_languages': 0, 'error': str(e)}

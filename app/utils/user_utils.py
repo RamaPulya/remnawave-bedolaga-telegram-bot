@@ -1,8 +1,8 @@
-import logging
 import secrets
 import string
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
+import structlog
 from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -11,7 +11,7 @@ from app.config import settings
 from app.database.models import ReferralEarning, Transaction, TransactionType, User
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def format_referrer_info(user: User) -> str:
@@ -54,7 +54,7 @@ async def generate_unique_referral_code(db: AsyncSession, telegram_id: int) -> s
         if not result.scalar_one_or_none():
             return code
 
-    timestamp = str(int(datetime.utcnow().timestamp()))[-6:]
+    timestamp = str(int(datetime.now(UTC).timestamp()))[-6:]
     return f'ref{timestamp}'
 
 
@@ -71,9 +71,7 @@ def get_effective_referral_commission_percent(user: User) -> int:
             getattr(user, 'telegram_id', None) or getattr(user, 'email', None) or f'#{getattr(user, "id", "unknown")}'
         )
         logger.error(
-            '❌ Некорректный процент комиссии для пользователя %s: %s',
-            user_id_display,
-            percent,
+            '❌ Некорректный процент комиссии для пользователя', user_id_display=user_id_display, percent=percent
         )
         return max(0, min(100, settings.REFERRAL_COMMISSION_PERCENT))
 
@@ -83,23 +81,23 @@ def get_effective_referral_commission_percent(user: User) -> int:
 async def mark_user_as_had_paid_subscription(db: AsyncSession, user: User) -> bool:
     try:
         if user.has_had_paid_subscription:
-            logger.debug(f'Пользователь {user.id} уже отмечен как имевший платную подписку')
+            logger.debug('Пользователь уже отмечен как имевший платную подписку', user_id=user.id)
             return True
 
         await db.execute(
-            update(User).where(User.id == user.id).values(has_had_paid_subscription=True, updated_at=datetime.utcnow())
+            update(User).where(User.id == user.id).values(has_had_paid_subscription=True, updated_at=datetime.now(UTC))
         )
 
         await db.commit()
-        logger.info(f'✅ Пользователь {user.id} отмечен как имевший платную подписку')
+        logger.info('✅ Пользователь отмечен как имевший платную подписку', user_id=user.id)
         return True
 
     except Exception as e:
-        logger.error(f'Ошибка отметки пользователя {user.id} как имевшего платную подписку: {e}')
+        logger.error('Ошибка отметки пользователя как имевшего платную подписку', user_id=user.id, error=e)
         try:
             await db.rollback()
         except Exception as rollback_error:
-            logger.error(f'Ошибка отката транзакции: {rollback_error}')
+            logger.error('Ошибка отката транзакции', rollback_error=rollback_error)
         return False
 
 
@@ -118,7 +116,7 @@ async def get_user_referral_summary(db: AsyncSession, user_id: int) -> dict:
         )
         total_earned_kopeks = total_earnings_result.scalar() or 0
 
-        month_ago = datetime.utcnow() - timedelta(days=30)
+        month_ago = datetime.now(UTC) - timedelta(days=30)
         month_earnings_result = await db.execute(
             select(func.coalesce(func.sum(ReferralEarning.amount_kopeks), 0)).where(
                 and_(ReferralEarning.user_id == user_id, ReferralEarning.created_at >= month_ago)
@@ -178,7 +176,7 @@ async def get_user_referral_summary(db: AsyncSession, user_id: int) -> dict:
         }
 
     except Exception as e:
-        logger.error(f'Ошибка получения статистики рефералов для пользователя {user_id}: {e}')
+        logger.error('Ошибка получения статистики рефералов для пользователя', user_id=user_id, error=e)
         return {
             'invited_count': 0,
             'paid_referrals_count': 0,
@@ -225,11 +223,11 @@ async def get_detailed_referral_list(db: AsyncSession, user_id: int, limit: int 
             )
             topups_count = topups_result.scalar() or 0
 
-            days_since_registration = (datetime.utcnow() - referral.created_at).days
+            days_since_registration = (datetime.now(UTC) - referral.created_at).days
 
             days_since_activity = None
             if referral.last_activity:
-                days_since_activity = (datetime.utcnow() - referral.last_activity).days
+                days_since_activity = (datetime.now(UTC) - referral.last_activity).days
 
             detailed_referrals.append(
                 {
@@ -259,7 +257,7 @@ async def get_detailed_referral_list(db: AsyncSession, user_id: int, limit: int 
         }
 
     except Exception as e:
-        logger.error(f'Ошибка получения списка рефералов для пользователя {user_id}: {e}')
+        logger.error('Ошибка получения списка рефералов для пользователя', user_id=user_id, error=e)
         return {
             'referrals': [],
             'total_count': 0,
@@ -272,7 +270,7 @@ async def get_detailed_referral_list(db: AsyncSession, user_id: int, limit: int 
 
 async def get_referral_analytics(db: AsyncSession, user_id: int) -> dict:
     try:
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         periods = {
             'today': now.replace(hour=0, minute=0, second=0, microsecond=0),
             'week': now - timedelta(days=7),
@@ -317,5 +315,5 @@ async def get_referral_analytics(db: AsyncSession, user_id: int) -> dict:
         return {'earnings_by_period': earnings_by_period, 'top_referrals': top_referrals}
 
     except Exception as e:
-        logger.error(f'Ошибка получения аналитики рефералов для пользователя {user_id}: {e}')
+        logger.error('Ошибка получения аналитики рефералов для пользователя', user_id=user_id, error=e)
         return {'earnings_by_period': {'today': 0, 'week': 0, 'month': 0, 'quarter': 0}, 'top_referrals': []}

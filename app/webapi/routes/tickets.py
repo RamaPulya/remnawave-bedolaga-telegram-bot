@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -28,7 +28,7 @@ from ..schemas.tickets import (
 
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def _serialize_message(message: TicketMessage) -> TicketMessageResponse:
@@ -121,7 +121,7 @@ async def update_ticket_status(
     except ValueError as error:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, 'Invalid ticket status') from error
 
-    closed_at = datetime.utcnow() if status_value == TicketStatus.CLOSED.value else None
+    closed_at = datetime.now(UTC) if status_value == TicketStatus.CLOSED.value else None
     success = await TicketCRUD.update_ticket_status(db, ticket_id, status_value, closed_at)
     if not success:
         raise HTTPException(status.HTTP_404_NOT_FOUND, 'Ticket not found')
@@ -146,7 +146,7 @@ async def update_ticket_priority(
         raise HTTPException(status.HTTP_404_NOT_FOUND, 'Ticket not found')
 
     ticket.priority = payload.priority
-    ticket.updated_at = datetime.utcnow()
+    ticket.updated_at = datetime.now(UTC)
     await db.commit()
 
     ticket = await TicketCRUD.get_ticket_by_id(db, ticket_id, load_messages=True, load_user=False)
@@ -161,7 +161,7 @@ async def update_reply_block(
     db: AsyncSession = Depends(get_db_session),
 ) -> TicketResponse:
     until = payload.until
-    if not payload.permanent and until and until <= datetime.utcnow():
+    if not payload.permanent and until and until <= datetime.now(UTC):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, 'Block expiration must be in the future')
 
     success = await TicketCRUD.set_user_reply_block(
@@ -255,7 +255,7 @@ async def reply_to_ticket(
             db=db,
         )
     except Exception as error:
-        logger.warning('Failed to emit ticket.message_added event: %s', error)
+        logger.warning('Failed to emit ticket.message_added event', error=error)
 
     return TicketReplyResponse(
         ticket=_serialize_ticket(ticket_with_messages, include_messages=True),
@@ -295,7 +295,9 @@ async def get_ticket_message_media(
         if file.file_path:
             media_url = str(request.url_for('download_media', file_id=message.media_file_id))
     except Exception as error:
-        logger.warning('Failed to resolve media URL for ticket %s message %s: %s', ticket_id, message_id, error)
+        logger.warning(
+            'Failed to resolve media URL for ticket message', ticket_id=ticket_id, message_id=message_id, error=error
+        )
     finally:
         await bot.session.close()
 
