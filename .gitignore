@@ -102,4 +102,5 @@ data/
 Thumbs.db
 
 # SpiderMan overrides: ignore backup files created by apply scripts
+*.bak.*
 app/**/*.bak.*
