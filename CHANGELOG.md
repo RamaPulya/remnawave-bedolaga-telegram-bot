@@ -1,5 +1,79 @@
 # Changelog
 
+## [3.16.3](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/compare/v3.16.2...v3.16.3) (2026-02-18)
+
+
+### Bug Fixes
+
+* 3 user deletion bugs — type cast, inner savepoint, lazy load ([af31c55](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/af31c551d2f23ef01425bdb2db8f255dbc3047e2))
+* auth middleware catches all commit errors, not just connection errors ([6409b0c](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/6409b0c023cd7957c43d5c1c3d83e671ccaf959c))
+* connected_squads stores UUIDs, not int IDs — use get_server_ids_by_uuids ([d7039d7](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/d7039d75a47fbf67436a9d39f2cd9f65f2646544))
+* deadlock on user deletion + robust migration 0002 ([b7b83ab](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/b7b83abb723913b3167e7462ff592a374c3f421b))
+* eliminate deadlock by matching lock order with webhook ([d651a6c](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/d651a6c02f501b7a0ded570f2db6addcc16173a9))
+* make migration 0002 robust with table existence checks ([f076269](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/f076269c323726c683a38db092d907591a26e647))
+* wrap user deletion steps in savepoints to prevent transaction cascade abort ([a38dfcb](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/a38dfcb75a47a185d979a8202f637d8b79812e67))
+
+## [3.16.2](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/compare/v3.16.1...v3.16.2) (2026-02-18)
+
+
+### Bug Fixes
+
+* auto-convert naive datetimes to UTC-aware on model load ([f7d33a7](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/f7d33a7d2b31145a839ee54676816aa657ac90da))
+* extend naive datetime guard to all model properties ([bd11801](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/bd11801467e917d76005d1a782c71f5ae4ffee6e))
+* handle naive datetime in raw SQL row comparison (payment/common) ([38f3a9a](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/38f3a9a16a24e85adf473f2150aad31574a87060))
+* handle naive datetimes in Subscription properties ([e512e5f](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/e512e5fe6e9009992b5bc8b9be7f53e0612f234a))
+* use AwareDateTime TypeDecorator for all datetime columns ([a7f3d65](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/a7f3d652c51ecd653900a530b7d38feaf603ecf1))
+
+## [3.16.1](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/compare/v3.16.0...v3.16.1) (2026-02-18)
+
+
+### Bug Fixes
+
+* add migration for partner system tables and columns ([4645be5](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/4645be53cbb3799aa6b2b6a623af30460357a554))
+* add migration for partner system tables and columns ([79ea398](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/79ea398d1db436a7812a799bf01b2c1c3b1b73be))
+
+## [3.16.0](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/compare/v3.15.1...v3.16.0) (2026-02-18)
+
+
+### New Features
+
+* add admin notifications for partner applications and withdrawals ([cf7cc5a](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/cf7cc5a84e295608009f255fcd0dcedb5a2a04a3))
+* add admin partner settings API (withdrawal toggle, requisites text, partner visibility) ([6881d97](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/6881d97bbb1f6cd8ca3609c2d9286a6e4fb24fc3))
+* add campaign_id to ReferralEarning for campaign attribution ([0c07812](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/0c07812ecc9502f54a7745a77b086fc52bdc0e34))
+* add partner system and withdrawal management to cabinet ([58bfaea](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/58bfaeaddbcbb98cb67dbd507847a0e5c8d07809))
+* attribute campaign registrations to partner for referral earnings ([767e965](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/767e9650285adc72b067b2c0b8a4d1ac5c5bba57))
+* blocked user detection during broadcasts, filter blocked from all notifications ([10e231e](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/10e231e52e0dbabd9195a2df373b3c95129a5e4f))
+* enforce 1-to-1 partner-campaign binding with partner info in campaigns ([366df18](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/366df18c547047a7c69192c768970ebc6ee426fc))
+* expose traffic_reset_mode in subscription response ([59383bd](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/59383bdbd8c72428d151cb24d132452414b14fa3))
+* expose traffic_reset_mode in tariff API response ([5d4a94b](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/5d4a94b8cea8f16f0b4c31e24a4695bee4c67af7))
+* include partner campaigns in /partner/status response ([ea5d932](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/ea5d932476553ad1750da3bebbd4b8f055478040))
+* link campaign registrations to partner for referral earnings ([c4dc43e](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/c4dc43e054e9faec2f9614fe51a64635f80c1796))
+* notify users on partner/withdrawal approve/reject ([327d4f4](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/327d4f4d1559e37dc591adbfd0c839d986d1068d))
+
+
+### Bug Fixes
+
+* add blocked_count column migration to universal_migration.py ([b4b10c9](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/b4b10c998cadbb879540e56dbd0e362b5497ee57))
+* add missing payment providers to payment_utils and fix {total_amount} formatting ([bdb6161](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/bdb61613de378efab4de6de98fde2de3b554c548))
+* add selectinload for subscription in campaign user list ([eb9dba3](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/eb9dba3f4728b478f2206ff992700a9677f879c7))
+* campaign web link uses ?campaign= param, not ?start= ([28f524b](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/28f524b7622ed975d2fece66edc94d9713354738))
+* correct subscription_service import in broadcast cleanup ([6c4e035](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/6c4e035146934dffb576477cc75f7365b2f27b99))
+* critical security and data integrity fixes for partner system ([8899749](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/88997492c3534ea2f6e194c0382c77302557c2f3))
+* handle YooKassa NotFoundError gracefully in get_payment_info ([df5b1a0](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/df5b1a072d99ff8aee0c94304b2a0214f0fcffe7))
+* medium-priority fixes for partner system ([7c20fde](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/7c20fde4e887749d72280a8804467645e5bab416))
+* move PartnerStatus enum before User class to fix NameError ([acc1323](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/acc1323a542b8e92433cabf1334d2d98bfa21e21))
+* prevent fileConfig from destroying structlog handlers ([e78b104](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/e78b1040a50ac14759bceab396d0c3e34dd79cdd))
+* reorder button_click_logs migration to nullify before ALTER TYPE ([df5415f](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/df5415f30b2aae4412ff5fbd3cac8076128b818c))
+* resolve HIGH-priority performance and security issues in partner system ([fcf3a2c](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/fcf3a2c8062752b2b1dc06b5993ac2d8ae80ee85))
+* return zeroed stats dict when withdrawal is disabled ([7883efc](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/7883efc3d6e6d8bedf8e4b7d72634cbab6e2f3d7))
+* unassign all campaigns when revoking partner status ([d39063b](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/d39063b22ffb6442e275db39704361cdb9251793))
+
+
+### Refactoring
+
+* replace universal_migration.py with Alembic ([b6c7f91](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/b6c7f91a7c79d108820c9f89c9070fde4843316c))
+* replace universal_migration.py with Alembic ([784616b](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/commit/784616b349ef12b35ee021dd7a7b2a2ef9fc57f6))
+
 ## [3.15.1](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/compare/v3.15.0...v3.15.1) (2026-02-17)
 
 
