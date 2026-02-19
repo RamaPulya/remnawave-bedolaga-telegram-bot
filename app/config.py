@@ -667,6 +667,7 @@ class Settings(BaseSettings):
     SPIDERMAN_MENU_MEDIA_PURCHASE_SUCCESS: str = ''
     SPIDERMAN_MENU_ADMIN_MAIN: str = ''
     SPIDERMAN_MENU_MEDIA_FALLBACK_PATH: str = ''
+    SPIDERMAN_FREE_PROXY_MENU_ENABLED: bool = True
     # --- SPIDERMAN OVERRIDES: CONFIG FLAGS END ---
     WEBHOOK_URL: str | None = None
     WEBHOOK_PATH: str = '/webhook'

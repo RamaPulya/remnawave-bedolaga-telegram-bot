@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import html
 import importlib
+from urllib.parse import quote_plus
 
 from aiogram import Dispatcher, F, types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.config import settings
 from app.localization.loader import DEFAULT_LANGUAGE
 from app.localization.texts import get_texts
 from app.spiderman.proxy_storage import (
@@ -52,11 +54,64 @@ def _proxy_button_label(language: str | None) -> str:
     return _loc(texts, 'MENU_FREE_PROXY', '⚡ Бесплатный Telegram Proxy')
 
 
+def _is_proxy_menu_enabled() -> bool:
+    return bool(getattr(settings, 'SPIDERMAN_FREE_PROXY_MENU_ENABLED', True))
+
+
+def _build_share_url(texts) -> str | None:
+    username = settings.get_bot_username()
+    if not username:
+        return None
+    username = username.strip().lstrip('@')
+    if not username:
+        return None
+
+    bot_link = f'https://t.me/{username}'
+    share_template = _loc(
+        texts,
+        'PROXY_SHARE_TEXT',
+        'Получи бесплатные прокси для Telegram и верни себе рабочий мессенджер.\nБот: {bot_username}',
+    )
+    try:
+        share_text = share_template.format(bot_username=f'@{username}')
+    except Exception:
+        share_text = share_template
+    return (
+        'https://t.me/share/url'
+        f'?url={quote_plus(bot_link)}'
+        f'&text={quote_plus(share_text)}'
+    )
+
+
+def _build_share_row(texts) -> list[InlineKeyboardButton] | None:
+    share_url = _build_share_url(texts)
+    if not share_url:
+        return None
+    return [
+        InlineKeyboardButton(
+            text=_loc(texts, 'PROXY_SHARE_BUTTON', '📣 Рекомендовать друзьям'),
+            url=share_url,
+        )
+    ]
+
+
 def _ensure_proxy_row(
     keyboard: InlineKeyboardMarkup,
     *,
     language: str | None,
 ) -> InlineKeyboardMarkup:
+    if not _is_proxy_menu_enabled():
+        if keyboard is None:
+            return InlineKeyboardMarkup(inline_keyboard=[])
+
+        rows = list(getattr(keyboard, 'inline_keyboard', []) or [])
+        filtered_rows: list[list[InlineKeyboardButton]] = []
+        for row in rows:
+            filtered_row = [button for button in row if getattr(button, 'callback_data', None) != _PROXY_MENU_CALLBACK]
+            if filtered_row:
+                filtered_rows.append(filtered_row)
+        return InlineKeyboardMarkup(inline_keyboard=filtered_rows)
+
     if keyboard is None:
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -109,12 +164,14 @@ def _batch_text(texts) -> str:
 
 
 def _build_home_keyboard(texts) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=_loc(texts, 'PROXY_GET_BATCH_BUTTON', '📦 Получить 3 прокси'), callback_data=_PROXY_GET_BATCH_CALLBACK)],
-            [InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')],
-        ]
-    )
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text=_loc(texts, 'PROXY_GET_BATCH_BUTTON', '📦 Получить 3 прокси'), callback_data=_PROXY_GET_BATCH_CALLBACK)],
+    ]
+    share_row = _build_share_row(texts)
+    if share_row:
+        rows.append(share_row)
+    rows.append([InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _build_batch_keyboard(texts, *, batch_id: str, links) -> InlineKeyboardMarkup:
@@ -136,6 +193,9 @@ def _build_batch_keyboard(texts, *, batch_id: str, links) -> InlineKeyboardMarku
             )
         ]
     )
+    share_row = _build_share_row(texts)
+    if share_row:
+        rows.append(share_row)
     rows.append([InlineKeyboardButton(text=texts.BACK, callback_data=_PROXY_MENU_CALLBACK)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -151,6 +211,9 @@ def _build_not_working_keyboard(texts, *, batch_id: str, links) -> InlineKeyboar
                 )
             ]
         )
+    share_row = _build_share_row(texts)
+    if share_row:
+        rows.append(share_row)
     rows.append([InlineKeyboardButton(text=texts.BACK, callback_data=f'{_PROXY_BACK_TO_BATCH_PREFIX}{batch_id}')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -236,12 +299,16 @@ async def _render_selected_link(
         f'<code>{safe_url}</code>\n\n'
         f'{_loc(texts, "PROXY_LINK_TIP", "Нажмите кнопку ниже для подключения.")}'
     )
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text=_loc(texts, 'PROXY_OPEN_URL_BUTTON', '🔌 Подключить прокси'), url=link.url)],
+        [InlineKeyboardButton(text=_loc(texts, 'PROXY_GET_MORE', '📦 Получить еще 3 прокси'), callback_data=_PROXY_GET_BATCH_CALLBACK)],
+    ]
+    share_row = _build_share_row(texts)
+    if share_row:
+        rows.append(share_row)
+    rows.append([InlineKeyboardButton(text=_loc(texts, 'PROXY_BACK_TO_LIST_BUTTON', '◀️ Назад к списку'), callback_data=f'{_PROXY_BACK_TO_BATCH_PREFIX}{batch_id}')])
     keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=_loc(texts, 'PROXY_OPEN_URL_BUTTON', '🔌 Подключить прокси'), url=link.url)],
-            [InlineKeyboardButton(text=_loc(texts, 'PROXY_BACK_TO_LIST_BUTTON', '◀️ Назад к списку'), callback_data=f'{_PROXY_BACK_TO_BATCH_PREFIX}{batch_id}')],
-            [InlineKeyboardButton(text=_loc(texts, 'PROXY_GET_MORE', '📦 Получить еще 3 прокси'), callback_data=_PROXY_GET_BATCH_CALLBACK)],
-        ]
+        inline_keyboard=rows
     )
     await menu_handlers.edit_or_answer_photo(
         callback=callback,
