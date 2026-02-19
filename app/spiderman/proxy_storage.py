@@ -6,6 +6,7 @@ import string
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
+import logging
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +38,7 @@ _TABLES_READY = False
 _TABLES_LOCK = asyncio.Lock()
 _ID_ALPHABET = string.ascii_lowercase + string.digits
 _SYSTEM_RANDOM = random.SystemRandom()
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -260,6 +262,8 @@ async def log_proxy_event(
     if not event_id:
         return
     await ensure_proxy_tables()
+
+    # 1) Persist proxy analytics in dedicated table (must not be rolled back by other stats flows).
     async with AsyncSessionLocal() as db:
         try:
             await db.execute(
@@ -289,21 +293,24 @@ async def log_proxy_event(
                     'button_text': button_text,
                 },
             )
-            # Best effort: keep compatibility with common menu stats.
-            try:
-                await MenuLayoutService.log_button_click(
-                    db,
-                    button_id=event_id,
-                    user_id=user_telegram_id,
-                    callback_data=callback_data,
-                    button_type='callback',
-                    button_text=button_text,
-                )
-            except Exception:
-                pass
             await db.commit()
-        except Exception:
+        except Exception as error:
             await db.rollback()
+            _logger.warning('Failed to write proxy event', extra={'event_id': event_id, 'error': str(error)})
+
+    # 2) Best effort mirror to common menu stats in a separate DB session.
+    try:
+        async with AsyncSessionLocal() as db_stats:
+            await MenuLayoutService.log_button_click(
+                db_stats,
+                button_id=event_id,
+                user_id=user_telegram_id,
+                callback_data=callback_data,
+                button_type='callback',
+                button_text=button_text,
+            )
+    except Exception:
+        pass
 
 
 async def create_proxy_link(
