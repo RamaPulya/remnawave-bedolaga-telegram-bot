@@ -18,6 +18,7 @@ from app.spiderman.menu_media import (
     get_env_key_for_slot,
     normalize_slot,
 )
+from app.spiderman.proxy_admin import PROXY_ADMIN_MENU_CALLBACK, register_proxy_admin_handlers
 from app.spiderman.states import SpidermanMediaStates
 from app.utils.decorators import admin_required, error_handler
 
@@ -25,6 +26,7 @@ from app.utils.decorators import admin_required, error_handler
 _MAIN_MENU_CALLBACK = 'admin_spiderman_menu'
 _CHANNEL_POST_CALLBACK = 'admin_spiderman_channel_post'
 _FILE_ID_MENU_CALLBACK = 'admin_spiderman_menu_file_id'
+_PROXY_MENU_CALLBACK = PROXY_ADMIN_MENU_CALLBACK
 _CLOSE_MESSAGE_CALLBACK = 'admin_spiderman_close_message'
 
 _SLOT_LABELS = {
@@ -58,6 +60,15 @@ def _build_main_menu_keyboard(texts) -> InlineKeyboardMarkup:
                         '📢 Пост в канал',
                     ),
                     callback_data=_CHANNEL_POST_CALLBACK,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=texts.t(
+                        'ADMIN_SPIDERMAN_PROXY_BUTTON',
+                        '⚡ Proxy',
+                    ),
+                    callback_data=_PROXY_MENU_CALLBACK,
                 )
             ],
             [InlineKeyboardButton(text=texts.BACK, callback_data='admin_panel')],
@@ -263,3 +274,4 @@ def register_handlers(dp: Dispatcher) -> None:
         close_spiderman_message,
         F.data == _CLOSE_MESSAGE_CALLBACK,
     )
+    register_proxy_admin_handlers(dp)

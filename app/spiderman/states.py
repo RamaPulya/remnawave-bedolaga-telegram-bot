@@ -8,3 +8,7 @@ class SpidermanMediaStates(StatesGroup):
 class SpidermanChannelPostStates(StatesGroup):
     waiting_for_post = State()
     confirming_post = State()
+
+
+class SpidermanProxyAdminStates(StatesGroup):
+    waiting_for_proxy_link = State()
