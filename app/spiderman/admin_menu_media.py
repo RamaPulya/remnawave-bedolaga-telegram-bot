@@ -41,6 +41,22 @@ _SLOT_LABELS = {
 }
 
 
+def _loc(texts, key: str, default: str) -> str:
+    values = getattr(texts, '_values', None)
+    if isinstance(values, dict) and key in values:
+        value = values.get(key)
+        if isinstance(value, str) and value:
+            return value
+
+    fallback_values = getattr(texts, '_fallback_values', None)
+    if isinstance(fallback_values, dict) and key in fallback_values:
+        value = fallback_values.get(key)
+        if isinstance(value, str) and value:
+            return value
+
+    return default
+
+
 def _build_main_menu_keyboard(texts) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -64,10 +80,7 @@ def _build_main_menu_keyboard(texts) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text=texts.t(
-                        'ADMIN_SPIDERMAN_PROXY_BUTTON',
-                        '⚡ Proxy',
-                    ),
+                    text=_loc(texts, 'ADMIN_SPIDERMAN_PROXY_BUTTON', '⚡ Proxy'),
                     callback_data=_PROXY_MENU_CALLBACK,
                 )
             ],

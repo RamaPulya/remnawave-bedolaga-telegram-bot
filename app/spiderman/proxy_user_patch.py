@@ -28,6 +28,7 @@ _PROXY_GET_BATCH_CALLBACK = 'proxy_get_batch'
 _PROXY_CLICK_PREFIX = 'proxy_click:'
 _PROXY_NOT_WORKING_PREFIX = 'proxy_not_working:'
 _PROXY_NOT_WORKING_SELECT_PREFIX = 'proxy_not_working_select:'
+_PROXY_BACK_TO_BATCH_PREFIX = 'proxy_back_batch:'
 
 
 def _loc(texts, key: str, default: str) -> str:
@@ -110,7 +111,7 @@ def _batch_text(texts) -> str:
 def _build_home_keyboard(texts) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=_loc(texts, 'PROXY_GET_BATCH_BUTTON', 'Получить 3 прокси'), callback_data=_PROXY_GET_BATCH_CALLBACK)],
+            [InlineKeyboardButton(text=_loc(texts, 'PROXY_GET_BATCH_BUTTON', '📦 Получить 3 прокси'), callback_data=_PROXY_GET_BATCH_CALLBACK)],
             [InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')],
         ]
     )
@@ -122,7 +123,7 @@ def _build_batch_keyboard(texts, *, batch_id: str, links) -> InlineKeyboardMarku
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=_loc(texts, 'PROXY_ITEM_BUTTON', 'Прокси {index}').format(index=index),
+                    text=_loc(texts, 'PROXY_ITEM_BUTTON', '🧩 Прокси {index}').format(index=index),
                     callback_data=f'{_PROXY_CLICK_PREFIX}{batch_id}:{link.id}',
                 )
             ]
@@ -130,12 +131,12 @@ def _build_batch_keyboard(texts, *, batch_id: str, links) -> InlineKeyboardMarku
     rows.append(
         [
             InlineKeyboardButton(
-                text=_loc(texts, 'PROXY_NOT_WORKING_BUTTON', 'Не работает'),
+                text=_loc(texts, 'PROXY_NOT_WORKING_BUTTON', '❌ Не работает'),
                 callback_data=f'{_PROXY_NOT_WORKING_PREFIX}{batch_id}',
             )
         ]
     )
-    rows.append([InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
+    rows.append([InlineKeyboardButton(text=texts.BACK, callback_data=_PROXY_MENU_CALLBACK)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -145,12 +146,12 @@ def _build_not_working_keyboard(texts, *, batch_id: str, links) -> InlineKeyboar
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=_loc(texts, 'PROXY_BAD_SELECT_ITEM', 'Не работает прокси {index}').format(index=index),
+                    text=_loc(texts, 'PROXY_BAD_SELECT_ITEM', '❌ Прокси {index} не работает').format(index=index),
                     callback_data=f'{_PROXY_NOT_WORKING_SELECT_PREFIX}{batch_id}:{link.id}',
                 )
             ]
         )
-    rows.append([InlineKeyboardButton(text=texts.BACK, callback_data=_PROXY_MENU_CALLBACK)])
+    rows.append([InlineKeyboardButton(text=texts.BACK, callback_data=f'{_PROXY_BACK_TO_BATCH_PREFIX}{batch_id}')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -188,6 +189,64 @@ async def _render_proxy_batch(
         callback=callback,
         caption=_batch_text(texts),
         keyboard=_build_batch_keyboard(texts, batch_id=batch_id, links=links),
+        parse_mode='HTML',
+    )
+
+
+async def _render_proxy_batch_by_id(
+    callback: types.CallbackQuery,
+    *,
+    language: str | None,
+    db,
+    user_telegram_id: int,
+    batch_id: str,
+) -> None:
+    links = await get_batch_links(
+        db,
+        user_telegram_id=user_telegram_id,
+        batch_id=batch_id,
+    )
+    if not links:
+        await _render_proxy_home(callback, language=language)
+        return
+
+    await _render_proxy_batch(
+        callback,
+        language=language,
+        batch_id=batch_id,
+        links=links,
+    )
+
+
+async def _render_selected_link(
+    callback: types.CallbackQuery,
+    *,
+    language: str | None,
+    link,
+    batch_id: str,
+    link_index: int | None,
+) -> None:
+    texts = get_texts(language or DEFAULT_LANGUAGE)
+    menu_handlers = importlib.import_module('app.handlers.menu')
+    safe_url = html.escape(link.url)
+    title = _loc(texts, 'PROXY_LINK_MESSAGE_TITLE', '🧩 Выбран прокси')
+    index_part = f' #{link_index}' if link_index else ''
+    caption = (
+        f'{title}{index_part}\n\n'
+        f'<code>{safe_url}</code>\n\n'
+        f'{_loc(texts, "PROXY_LINK_TIP", "Нажмите кнопку ниже для подключения.")}'
+    )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=_loc(texts, 'PROXY_OPEN_URL_BUTTON', '🔌 Подключить прокси'), url=link.url)],
+            [InlineKeyboardButton(text=_loc(texts, 'PROXY_BACK_TO_LIST_BUTTON', '◀️ Назад к списку'), callback_data=f'{_PROXY_BACK_TO_BATCH_PREFIX}{batch_id}')],
+            [InlineKeyboardButton(text=_loc(texts, 'PROXY_GET_MORE', '📦 Получить еще 3 прокси'), callback_data=_PROXY_GET_BATCH_CALLBACK)],
+        ]
+    )
+    await menu_handlers.edit_or_answer_photo(
+        callback=callback,
+        caption=caption,
+        keyboard=keyboard,
         parse_mode='HTML',
     )
 
@@ -294,24 +353,25 @@ async def send_single_proxy_link(callback: types.CallbackQuery, db_user, db, sta
         button_text='proxy_link_click',
     )
 
-    if callback.message is None:
-        await callback.answer()
-        return
-
-    safe_url = html.escape(link.url)
-    message_text = _loc(texts, 'PROXY_LINK_MESSAGE', 'Ссылка на прокси:\n<code>{url}</code>').format(url=safe_url)
-    await callback.message.answer(
-        message_text,
-        parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text=_loc(texts, 'PROXY_OPEN_URL_BUTTON', 'Открыть прокси'), url=link.url)],
-                [InlineKeyboardButton(text=_loc(texts, 'PROXY_GET_MORE', 'Получить еще 3 прокси'), callback_data=_PROXY_GET_BATCH_CALLBACK)],
-                [InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')],
-            ]
-        ),
+    batch_links = await get_batch_links(
+        db,
+        user_telegram_id=callback.from_user.id,
+        batch_id=batch_id,
     )
-    await callback.answer(_loc(texts, 'PROXY_LINK_SENT_ALERT', 'Ссылка отправлена.'))
+    link_index = None
+    for index, item in enumerate(batch_links, start=1):
+        if item.id == link.id:
+            link_index = index
+            break
+
+    await _render_selected_link(
+        callback,
+        language=language,
+        link=link,
+        batch_id=batch_id,
+        link_index=link_index,
+    )
+    await callback.answer(_loc(texts, 'PROXY_LINK_SENT_ALERT', 'Ссылка готова.'))
 
 
 async def open_not_working_selector(callback: types.CallbackQuery, db_user, db, state) -> None:
@@ -422,12 +482,35 @@ async def process_not_working_selection(callback: types.CallbackQuery, db_user, 
     )
 
 
+async def back_to_proxy_batch(callback: types.CallbackQuery, db_user, db, state) -> None:
+    if state is not None:
+        await state.clear()
+
+    data = callback.data or ''
+    batch_id = data[len(_PROXY_BACK_TO_BATCH_PREFIX) :].strip()
+    language = getattr(db_user, 'language', None)
+    if not batch_id:
+        await _render_proxy_home(callback, language=language)
+        await callback.answer()
+        return
+
+    await _render_proxy_batch_by_id(
+        callback,
+        language=language,
+        db=db,
+        user_telegram_id=callback.from_user.id,
+        batch_id=batch_id,
+    )
+    await callback.answer()
+
+
 def register_proxy_user_handlers(dp: Dispatcher) -> None:
     dp.callback_query.register(show_free_proxy_menu, F.data == _PROXY_MENU_CALLBACK)
     dp.callback_query.register(send_proxy_batch, F.data == _PROXY_GET_BATCH_CALLBACK)
     dp.callback_query.register(send_single_proxy_link, F.data.startswith(_PROXY_CLICK_PREFIX))
     dp.callback_query.register(open_not_working_selector, F.data.startswith(_PROXY_NOT_WORKING_PREFIX))
     dp.callback_query.register(process_not_working_selection, F.data.startswith(_PROXY_NOT_WORKING_SELECT_PREFIX))
+    dp.callback_query.register(back_to_proxy_batch, F.data.startswith(_PROXY_BACK_TO_BATCH_PREFIX))
 
 
 def apply_proxy_feature_patches() -> None:

@@ -621,25 +621,34 @@ async def get_proxy_stats(
     period_key: str,
 ) -> dict[str, ProxyMetric]:
     start_at = _get_stats_period_start(period_key)
+    # In production, callback clicks are consistently tracked by middleware
+    # with button_id=callback_data. Use those values as the source of truth.
+    event_filters = {
+        PROXY_EVENT_SCREEN_OPEN: ('menu_free_proxy', False),
+        PROXY_EVENT_GET_BATCH_CLICK: ('proxy_get_batch', False),
+        PROXY_EVENT_LINK_CLICK: ('proxy_click:', True),
+        PROXY_EVENT_NOT_WORKING_OPEN: ('proxy_not_working:', True),
+        PROXY_EVENT_NOT_WORKING_SUBMIT: ('proxy_not_working_select:', True),
+    }
 
-    query = (
-        select(
-            ButtonClickLog.button_id,
+    stats: dict[str, ProxyMetric] = {}
+    for event_id, (value, is_prefix) in event_filters.items():
+        query = select(
             func.count(ButtonClickLog.id).label('total'),
             func.count(func.distinct(ButtonClickLog.user_id)).label('unique_users'),
         )
-        .where(ButtonClickLog.button_id.in_(PROXY_TRACKED_EVENTS))
-        .group_by(ButtonClickLog.button_id)
-    )
-    if start_at is not None:
-        query = query.where(ButtonClickLog.clicked_at >= start_at)
+        if is_prefix:
+            query = query.where(ButtonClickLog.button_id.like(f'{value}%'))
+        else:
+            query = query.where(ButtonClickLog.button_id == value)
+        if start_at is not None:
+            query = query.where(ButtonClickLog.clicked_at >= start_at)
 
-    result = await db.execute(query)
-
-    stats: dict[str, ProxyMetric] = {event: ProxyMetric() for event in PROXY_TRACKED_EVENTS}
-    for row in result.all():
-        stats[row.button_id] = ProxyMetric(
-            total=int(row.total or 0),
-            unique_users=int(row.unique_users or 0),
+        result = await db.execute(query)
+        row = result.first()
+        stats[event_id] = ProxyMetric(
+            total=int(row.total or 0) if row else 0,
+            unique_users=int(row.unique_users or 0) if row else 0,
         )
+
     return stats
