@@ -261,18 +261,14 @@ async def create_proxy_link(
                         name,
                         url,
                         is_active,
-                        created_by,
-                        created_at,
-                        updated_at
+                        created_by
                     )
                     VALUES (
                         :id,
                         :name,
                         :url,
                         TRUE,
-                        :created_by,
-                        :created_at,
-                        :updated_at
+                        :created_by
                     )
                     """
                 ),
@@ -281,8 +277,6 @@ async def create_proxy_link(
                     'name': normalized_name,
                     'url': url,
                     'created_by': created_by,
-                    'created_at': datetime.now(UTC),
-                    'updated_at': datetime.now(UTC),
                 },
             )
             await db.commit()
@@ -367,14 +361,13 @@ async def set_proxy_link_active(db: AsyncSession, link_id: str, is_active: bool)
             UPDATE spiderman_proxy_links
             SET
                 is_active = :is_active,
-                updated_at = :updated_at
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = :id
             """
         ),
         {
             'id': link_id,
             'is_active': bool(is_active),
-            'updated_at': datetime.now(UTC),
         },
     )
     await db.commit()
@@ -408,8 +401,6 @@ async def check_proxy_batch_limits(
 ) -> tuple[bool, int, int]:
     await ensure_proxy_tables()
     now = datetime.now(UTC)
-    day_start = now - timedelta(days=1)
-
     result = await db.execute(
         text(
             """
@@ -419,12 +410,11 @@ async def check_proxy_batch_limits(
             FROM spiderman_proxy_issue_history
             WHERE
                 user_telegram_id = :user_telegram_id
-                AND issued_at >= :day_start
+                AND issued_at >= (CURRENT_TIMESTAMP - INTERVAL '1 day')
             """
         ),
         {
             'user_telegram_id': user_telegram_id,
-            'day_start': day_start,
         },
     )
     row = result.mappings().first() or {}
@@ -510,7 +500,6 @@ async def issue_proxy_batch(
         return '', []
 
     batch_id = _generate_id()
-    issued_at = datetime.now(UTC)
 
     for link in selected:
         await db.execute(
@@ -520,15 +509,13 @@ async def issue_proxy_batch(
                     id,
                     user_telegram_id,
                     batch_id,
-                    proxy_link_id,
-                    issued_at
+                    proxy_link_id
                 )
                 VALUES (
                     :id,
                     :user_telegram_id,
                     :batch_id,
-                    :proxy_link_id,
-                    :issued_at
+                    :proxy_link_id
                 )
                 """
             ),
@@ -537,7 +524,6 @@ async def issue_proxy_batch(
                 'user_telegram_id': user_telegram_id,
                 'batch_id': batch_id,
                 'proxy_link_id': link.id,
-                'issued_at': issued_at,
             },
         )
     await db.commit()

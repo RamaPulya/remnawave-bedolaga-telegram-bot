@@ -47,12 +47,28 @@ _PERIOD_KEYS = ('today', '7d', '30d', 'all')
 _PAGE_SIZE = 8
 
 
+def _loc(texts, key: str, default: str) -> str:
+    values = getattr(texts, '_values', None)
+    if isinstance(values, dict) and key in values:
+        value = values.get(key)
+        if isinstance(value, str) and value:
+            return value
+
+    fallback_values = getattr(texts, '_fallback_values', None)
+    if isinstance(fallback_values, dict) and key in fallback_values:
+        value = fallback_values.get(key)
+        if isinstance(value, str) and value:
+            return value
+
+    return default
+
+
 def _period_label(texts, period_key: str) -> str:
     mapping = {
-        'today': texts.t('PROXY_PERIOD_TODAY', 'Сегодня'),
-        '7d': texts.t('PROXY_PERIOD_7D', '7 дней'),
-        '30d': texts.t('PROXY_PERIOD_30D', '30 дней'),
-        'all': texts.t('PROXY_PERIOD_ALL', 'Все время'),
+        'today': _loc(texts, 'PROXY_PERIOD_TODAY', 'Сегодня'),
+        '7d': _loc(texts, 'PROXY_PERIOD_7D', '7 дней'),
+        '30d': _loc(texts, 'PROXY_PERIOD_30D', '30 дней'),
+        'all': _loc(texts, 'PROXY_PERIOD_ALL', 'Все время'),
     }
     return mapping.get(period_key, mapping['today'])
 
@@ -66,15 +82,15 @@ def _build_proxy_menu_keyboard(texts, *, period_key: str) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=texts.t('PROXY_PERIOD_TODAY', 'Сегодня'), callback_data=f'{_PROXY_STATS_PREFIX}today'),
-                InlineKeyboardButton(text=texts.t('PROXY_PERIOD_7D', '7 дней'), callback_data=f'{_PROXY_STATS_PREFIX}7d'),
+                InlineKeyboardButton(text=_loc(texts, 'PROXY_PERIOD_TODAY', 'Сегодня'), callback_data=f'{_PROXY_STATS_PREFIX}today'),
+                InlineKeyboardButton(text=_loc(texts, 'PROXY_PERIOD_7D', '7 дней'), callback_data=f'{_PROXY_STATS_PREFIX}7d'),
             ],
             [
-                InlineKeyboardButton(text=texts.t('PROXY_PERIOD_30D', '30 дней'), callback_data=f'{_PROXY_STATS_PREFIX}30d'),
-                InlineKeyboardButton(text=texts.t('PROXY_PERIOD_ALL', 'Все время'), callback_data=f'{_PROXY_STATS_PREFIX}all'),
+                InlineKeyboardButton(text=_loc(texts, 'PROXY_PERIOD_30D', '30 дней'), callback_data=f'{_PROXY_STATS_PREFIX}30d'),
+                InlineKeyboardButton(text=_loc(texts, 'PROXY_PERIOD_ALL', 'Все время'), callback_data=f'{_PROXY_STATS_PREFIX}all'),
             ],
-            [InlineKeyboardButton(text=texts.t('PROXY_ADD_LINK', '➕ Добавить ссылку'), callback_data=_PROXY_ADD_CALLBACK)],
-            [InlineKeyboardButton(text=texts.t('PROXY_LINKS_LIST', '📋 Список ссылок'), callback_data=f'{_PROXY_PAGE_PREFIX}1')],
+            [InlineKeyboardButton(text=_loc(texts, 'PROXY_ADD_LINK', '➕ Добавить ссылку'), callback_data=_PROXY_ADD_CALLBACK)],
+            [InlineKeyboardButton(text=_loc(texts, 'PROXY_LINKS_LIST', '📋 Список ссылок'), callback_data=f'{_PROXY_PAGE_PREFIX}1')],
             [InlineKeyboardButton(text=texts.BACK, callback_data='admin_spiderman_menu')],
         ]
     )
@@ -119,18 +135,18 @@ def _build_links_list_keyboard(texts, *, items, page: int, total_pages: int) -> 
     if nav_row:
         rows.append(nav_row)
 
-    rows.append([InlineKeyboardButton(text=texts.t('PROXY_ADD_LINK', '➕ Добавить ссылку'), callback_data=_PROXY_ADD_CALLBACK)])
+    rows.append([InlineKeyboardButton(text=_loc(texts, 'PROXY_ADD_LINK', '➕ Добавить ссылку'), callback_data=_PROXY_ADD_CALLBACK)])
     rows.append([InlineKeyboardButton(text=texts.BACK, callback_data=PROXY_ADMIN_MENU_CALLBACK)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _build_link_details_keyboard(texts, *, link_id: str, is_active: bool) -> InlineKeyboardMarkup:
-    toggle_text = texts.t('PROXY_DISABLE_LINK', '⛔ Выключить') if is_active else texts.t('PROXY_ENABLE_LINK', '✅ Включить')
+    toggle_text = _loc(texts, 'PROXY_DISABLE_LINK', '⛔ Выключить') if is_active else _loc(texts, 'PROXY_ENABLE_LINK', '✅ Включить')
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=toggle_text, callback_data=f'{_PROXY_TOGGLE_PREFIX}{link_id}')],
-            [InlineKeyboardButton(text=texts.t('PROXY_DELETE_LINK', '🗑 Удалить'), callback_data=f'{_PROXY_DELETE_ASK_PREFIX}{link_id}')],
-            [InlineKeyboardButton(text=texts.t('PROXY_LINKS_LIST', '📋 Список ссылок'), callback_data=f'{_PROXY_PAGE_PREFIX}1')],
+            [InlineKeyboardButton(text=_loc(texts, 'PROXY_DELETE_LINK', '🗑 Удалить'), callback_data=f'{_PROXY_DELETE_ASK_PREFIX}{link_id}')],
+            [InlineKeyboardButton(text=_loc(texts, 'PROXY_LINKS_LIST', '📋 Список ссылок'), callback_data=f'{_PROXY_PAGE_PREFIX}1')],
             [InlineKeyboardButton(text=texts.BACK, callback_data=PROXY_ADMIN_MENU_CALLBACK)],
         ]
     )
@@ -139,8 +155,8 @@ def _build_link_details_keyboard(texts, *, link_id: str, is_active: bool) -> Inl
 def _build_delete_confirm_keyboard(texts, *, link_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=texts.t('PROXY_CONFIRM_DELETE', 'Да, удалить'), callback_data=f'{_PROXY_DELETE_PREFIX}{link_id}')],
-            [InlineKeyboardButton(text=texts.t('PROXY_CANCEL_DELETE', 'Отмена'), callback_data=f'{_PROXY_ITEM_PREFIX}{link_id}')],
+            [InlineKeyboardButton(text=_loc(texts, 'PROXY_CONFIRM_DELETE', 'Да, удалить'), callback_data=f'{_PROXY_DELETE_PREFIX}{link_id}')],
+            [InlineKeyboardButton(text=_loc(texts, 'PROXY_CANCEL_DELETE', 'Отмена'), callback_data=f'{_PROXY_ITEM_PREFIX}{link_id}')],
         ]
     )
 
@@ -169,11 +185,11 @@ def _format_created_at(value: datetime | None) -> str:
 
 def _build_stats_lines(texts, stats: dict) -> list[str]:
     labels = {
-        PROXY_EVENT_SCREEN_OPEN: texts.t('PROXY_STAT_SCREEN_OPEN', 'Открыли экран'),
-        PROXY_EVENT_GET_BATCH_CLICK: texts.t('PROXY_STAT_GET_BATCH', 'Нажали "Получить 3"'),
-        PROXY_EVENT_LINK_CLICK: texts.t('PROXY_STAT_LINK_CLICK', 'Нажали "Прокси 1/2/3"'),
-        PROXY_EVENT_NOT_WORKING_OPEN: texts.t('PROXY_STAT_NOT_WORKING_OPEN', 'Открыли "Не работает"'),
-        PROXY_EVENT_NOT_WORKING_SUBMIT: texts.t('PROXY_STAT_NOT_WORKING_SUBMIT', 'Подтвердили "Не работает"'),
+        PROXY_EVENT_SCREEN_OPEN: _loc(texts, 'PROXY_STAT_SCREEN_OPEN', 'Открыли экран'),
+        PROXY_EVENT_GET_BATCH_CLICK: _loc(texts, 'PROXY_STAT_GET_BATCH', 'Нажали "Получить 3"'),
+        PROXY_EVENT_LINK_CLICK: _loc(texts, 'PROXY_STAT_LINK_CLICK', 'Нажали "Прокси 1/2/3"'),
+        PROXY_EVENT_NOT_WORKING_OPEN: _loc(texts, 'PROXY_STAT_NOT_WORKING_OPEN', 'Открыли "Не работает"'),
+        PROXY_EVENT_NOT_WORKING_SUBMIT: _loc(texts, 'PROXY_STAT_NOT_WORKING_SUBMIT', 'Подтвердили "Не работает"'),
     }
     lines: list[str] = []
     for event_id in (

@@ -30,9 +30,25 @@ _PROXY_NOT_WORKING_PREFIX = 'proxy_not_working:'
 _PROXY_NOT_WORKING_SELECT_PREFIX = 'proxy_not_working_select:'
 
 
+def _loc(texts, key: str, default: str) -> str:
+    values = getattr(texts, '_values', None)
+    if isinstance(values, dict) and key in values:
+        value = values.get(key)
+        if isinstance(value, str) and value:
+            return value
+
+    fallback_values = getattr(texts, '_fallback_values', None)
+    if isinstance(fallback_values, dict) and key in fallback_values:
+        value = fallback_values.get(key)
+        if isinstance(value, str) and value:
+            return value
+
+    return default
+
+
 def _proxy_button_label(language: str | None) -> str:
     texts = get_texts(language or DEFAULT_LANGUAGE)
-    return texts.t('MENU_FREE_PROXY', '⚡ Бесплатный Telegram Proxy')
+    return _loc(texts, 'MENU_FREE_PROXY', '⚡ Бесплатный Telegram Proxy')
 
 
 def _ensure_proxy_row(
@@ -68,7 +84,8 @@ def _ensure_proxy_row(
 
 
 def _intro_text(texts) -> str:
-    return texts.t(
+    return _loc(
+        texts,
         'PROXY_FREE_INTRO',
         (
             '⚡ <b>Бесплатные Telegram Proxy</b>\n\n'
@@ -80,7 +97,8 @@ def _intro_text(texts) -> str:
 
 
 def _batch_text(texts) -> str:
-    return texts.t(
+    return _loc(
+        texts,
         'PROXY_BATCH_TEXT',
         (
             'Выберите прокси ниже.\n'
@@ -92,7 +110,7 @@ def _batch_text(texts) -> str:
 def _build_home_keyboard(texts) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=texts.t('PROXY_GET_BATCH_BUTTON', 'Получить 3 прокси'), callback_data=_PROXY_GET_BATCH_CALLBACK)],
+            [InlineKeyboardButton(text=_loc(texts, 'PROXY_GET_BATCH_BUTTON', 'Получить 3 прокси'), callback_data=_PROXY_GET_BATCH_CALLBACK)],
             [InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')],
         ]
     )
@@ -104,7 +122,7 @@ def _build_batch_keyboard(texts, *, batch_id: str, links) -> InlineKeyboardMarku
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=texts.t('PROXY_ITEM_BUTTON', 'Прокси {index}').format(index=index),
+                    text=_loc(texts, 'PROXY_ITEM_BUTTON', 'Прокси {index}').format(index=index),
                     callback_data=f'{_PROXY_CLICK_PREFIX}{batch_id}:{link.id}',
                 )
             ]
@@ -112,7 +130,7 @@ def _build_batch_keyboard(texts, *, batch_id: str, links) -> InlineKeyboardMarku
     rows.append(
         [
             InlineKeyboardButton(
-                text=texts.t('PROXY_NOT_WORKING_BUTTON', 'Не работает'),
+                text=_loc(texts, 'PROXY_NOT_WORKING_BUTTON', 'Не работает'),
                 callback_data=f'{_PROXY_NOT_WORKING_PREFIX}{batch_id}',
             )
         ]
@@ -127,7 +145,7 @@ def _build_not_working_keyboard(texts, *, batch_id: str, links) -> InlineKeyboar
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=texts.t('PROXY_BAD_SELECT_ITEM', 'Не работает прокси {index}').format(index=index),
+                    text=_loc(texts, 'PROXY_BAD_SELECT_ITEM', 'Не работает прокси {index}').format(index=index),
                     callback_data=f'{_PROXY_NOT_WORKING_SELECT_PREFIX}{batch_id}:{link.id}',
                 )
             ]
@@ -208,12 +226,12 @@ async def send_proxy_batch(callback: types.CallbackQuery, db_user, db, state) ->
     if not allowed:
         if daily_remaining <= 0:
             await callback.answer(
-                texts.t('PROXY_DAILY_LIMIT_REACHED', 'Достигнут дневной лимит: 10 выдач в сутки.'),
+                _loc(texts, 'PROXY_DAILY_LIMIT_REACHED', 'Достигнут дневной лимит: 10 выдач в сутки.'),
                 show_alert=True,
             )
         else:
             await callback.answer(
-                texts.t('PROXY_COOLDOWN', 'Слишком часто. Попробуйте через {seconds} сек.').format(seconds=wait_seconds),
+                _loc(texts, 'PROXY_COOLDOWN', 'Слишком часто. Попробуйте через {seconds} сек.').format(seconds=wait_seconds),
                 show_alert=True,
             )
         return
@@ -225,7 +243,7 @@ async def send_proxy_batch(callback: types.CallbackQuery, db_user, db, state) ->
     )
     if not links:
         await callback.answer(
-            texts.t('PROXY_LIST_EMPTY', 'Список прокси пока пуст. Попробуйте позже.'),
+            _loc(texts, 'PROXY_LIST_EMPTY', 'Список прокси пока пуст. Попробуйте позже.'),
             show_alert=True,
         )
         await _render_proxy_home(callback, language=language)
@@ -238,7 +256,7 @@ async def send_proxy_batch(callback: types.CallbackQuery, db_user, db, state) ->
         links=links,
     )
     await callback.answer(
-        texts.t('PROXY_BATCH_SENT', 'Готово. Вот 3 прокси.'),
+        _loc(texts, 'PROXY_BATCH_SENT', 'Готово. Вот 3 прокси.'),
     )
 
 
@@ -281,22 +299,19 @@ async def send_single_proxy_link(callback: types.CallbackQuery, db_user, db, sta
         return
 
     safe_url = html.escape(link.url)
-    message_text = texts.t(
-        'PROXY_LINK_MESSAGE',
-        'Ссылка на прокси:\n<code>{url}</code>',
-    ).format(url=safe_url)
+    message_text = _loc(texts, 'PROXY_LINK_MESSAGE', 'Ссылка на прокси:\n<code>{url}</code>').format(url=safe_url)
     await callback.message.answer(
         message_text,
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text=texts.t('PROXY_OPEN_URL_BUTTON', 'Открыть прокси'), url=link.url)],
-                [InlineKeyboardButton(text=texts.t('PROXY_GET_MORE', 'Получить еще 3 прокси'), callback_data=_PROXY_GET_BATCH_CALLBACK)],
+                [InlineKeyboardButton(text=_loc(texts, 'PROXY_OPEN_URL_BUTTON', 'Открыть прокси'), url=link.url)],
+                [InlineKeyboardButton(text=_loc(texts, 'PROXY_GET_MORE', 'Получить еще 3 прокси'), callback_data=_PROXY_GET_BATCH_CALLBACK)],
                 [InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')],
             ]
         ),
     )
-    await callback.answer(texts.t('PROXY_LINK_SENT_ALERT', 'Ссылка отправлена.'))
+    await callback.answer(_loc(texts, 'PROXY_LINK_SENT_ALERT', 'Ссылка отправлена.'))
 
 
 async def open_not_working_selector(callback: types.CallbackQuery, db_user, db, state) -> None:
@@ -331,10 +346,7 @@ async def open_not_working_selector(callback: types.CallbackQuery, db_user, db, 
     menu_handlers = importlib.import_module('app.handlers.menu')
     await menu_handlers.edit_or_answer_photo(
         callback=callback,
-        caption=texts.t(
-            'PROXY_NOT_WORKING_CHOOSE',
-            'Выберите, какой именно прокси не работает:',
-        ),
+        caption=_loc(texts, 'PROXY_NOT_WORKING_CHOOSE', 'Выберите, какой именно прокси не работает:'),
         keyboard=_build_not_working_keyboard(texts, batch_id=batch_id, links=links),
         parse_mode='HTML',
     )
@@ -376,12 +388,12 @@ async def process_not_working_selection(callback: types.CallbackQuery, db_user, 
     if not allowed:
         if daily_remaining <= 0:
             await callback.answer(
-                texts.t('PROXY_DAILY_LIMIT_REACHED', 'Достигнут дневной лимит: 10 выдач в сутки.'),
+                _loc(texts, 'PROXY_DAILY_LIMIT_REACHED', 'Достигнут дневной лимит: 10 выдач в сутки.'),
                 show_alert=True,
             )
         else:
             await callback.answer(
-                texts.t('PROXY_COOLDOWN', 'Слишком часто. Попробуйте через {seconds} сек.').format(seconds=wait_seconds),
+                _loc(texts, 'PROXY_COOLDOWN', 'Слишком часто. Попробуйте через {seconds} сек.').format(seconds=wait_seconds),
                 show_alert=True,
             )
         return
@@ -393,7 +405,7 @@ async def process_not_working_selection(callback: types.CallbackQuery, db_user, 
     )
     if not links:
         await callback.answer(
-            texts.t('PROXY_LIST_EMPTY', 'Список прокси пока пуст. Попробуйте позже.'),
+            _loc(texts, 'PROXY_LIST_EMPTY', 'Список прокси пока пуст. Попробуйте позже.'),
             show_alert=True,
         )
         await _render_proxy_home(callback, language=language)
@@ -406,7 +418,7 @@ async def process_not_working_selection(callback: types.CallbackQuery, db_user, 
         links=links,
     )
     await callback.answer(
-        texts.t('PROXY_REPLACED', 'Понял. Выдал новую подборку.'),
+        _loc(texts, 'PROXY_REPLACED', 'Понял. Выдал новую подборку.'),
     )
 
 
