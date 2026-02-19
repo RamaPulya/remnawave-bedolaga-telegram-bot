@@ -7,11 +7,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
-from sqlalchemy import func, select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.database import AsyncSessionLocal
-from app.database.models import ButtonClickLog
 from app.services.menu_layout_service import MenuLayoutService
 
 
@@ -195,6 +194,20 @@ async def ensure_proxy_tables() -> None:
             await db.execute(
                 text(
                     """
+                    CREATE TABLE IF NOT EXISTS spiderman_proxy_events (
+                        id VARCHAR(32) PRIMARY KEY,
+                        user_telegram_id BIGINT NULL,
+                        event_id VARCHAR(64) NOT NULL,
+                        callback_data TEXT NULL,
+                        button_text TEXT NULL,
+                        occurred_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+            await db.execute(
+                text(
+                    """
                     CREATE INDEX IF NOT EXISTS ix_spider_proxy_links_active
                     ON spiderman_proxy_links (is_active)
                     """
@@ -216,6 +229,22 @@ async def ensure_proxy_tables() -> None:
                     """
                 )
             )
+            await db.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_spider_proxy_events_event_time
+                    ON spiderman_proxy_events (event_id, occurred_at)
+                    """
+                )
+            )
+            await db.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_spider_proxy_events_user_time
+                    ON spiderman_proxy_events (user_telegram_id, occurred_at)
+                    """
+                )
+            )
             await db.commit()
 
         _TABLES_READY = True
@@ -230,15 +259,51 @@ async def log_proxy_event(
 ) -> None:
     if not event_id:
         return
+    await ensure_proxy_tables()
     async with AsyncSessionLocal() as db:
-        await MenuLayoutService.log_button_click(
-            db,
-            button_id=event_id,
-            user_id=user_telegram_id,
-            callback_data=callback_data,
-            button_type='callback',
-            button_text=button_text,
-        )
+        try:
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO spiderman_proxy_events (
+                        id,
+                        user_telegram_id,
+                        event_id,
+                        callback_data,
+                        button_text
+                    )
+                    VALUES (
+                        :id,
+                        :user_telegram_id,
+                        :event_id,
+                        :callback_data,
+                        :button_text
+                    )
+                    """
+                ),
+                {
+                    'id': _generate_id(),
+                    'user_telegram_id': user_telegram_id,
+                    'event_id': event_id,
+                    'callback_data': callback_data,
+                    'button_text': button_text,
+                },
+            )
+            # Best effort: keep compatibility with common menu stats.
+            try:
+                await MenuLayoutService.log_button_click(
+                    db,
+                    button_id=event_id,
+                    user_id=user_telegram_id,
+                    callback_data=callback_data,
+                    button_type='callback',
+                    button_text=button_text,
+                )
+            except Exception:
+                pass
+            await db.commit()
+        except Exception:
+            await db.rollback()
 
 
 async def create_proxy_link(
@@ -623,35 +688,34 @@ async def get_proxy_stats(
     *,
     period_key: str,
 ) -> dict[str, ProxyMetric]:
+    await ensure_proxy_tables()
     start_at = _get_stats_period_start(period_key)
-    # In production, callback clicks are consistently tracked by middleware
-    # with button_id=callback_data. Use those values as the source of truth.
-    event_filters = {
-        PROXY_EVENT_SCREEN_OPEN: ('menu_free_proxy', False),
-        PROXY_EVENT_GET_BATCH_CLICK: ('proxy_get_batch', False),
-        PROXY_EVENT_LINK_CLICK: ('proxy_click:', True),
-        PROXY_EVENT_NOT_WORKING_OPEN: ('proxy_not_working:', True),
-        PROXY_EVENT_NOT_WORKING_SUBMIT: ('proxy_not_working_select:', True),
-    }
+    if start_at is not None:
+        # DB columns are TIMESTAMP (without tz), pass naive UTC value.
+        start_at = start_at.astimezone(UTC).replace(tzinfo=None)
 
-    stats: dict[str, ProxyMetric] = {}
-    for event_id, (value, is_prefix) in event_filters.items():
-        query = select(
-            func.count(ButtonClickLog.id).label('total'),
-            func.count(func.distinct(ButtonClickLog.user_id)).label('unique_users'),
-        )
-        if is_prefix:
-            query = query.where(ButtonClickLog.button_id.like(f'{value}%'))
-        else:
-            query = query.where(ButtonClickLog.button_id == value)
-        if start_at is not None:
-            query = query.where(ButtonClickLog.clicked_at >= start_at)
+    sql = """
+        SELECT
+            event_id,
+            COUNT(*) AS total,
+            COUNT(DISTINCT user_telegram_id) AS unique_users
+        FROM spiderman_proxy_events
+        WHERE event_id = ANY(:event_ids)
+    """
+    params: dict[str, object] = {'event_ids': list(PROXY_TRACKED_EVENTS)}
+    if start_at is not None:
+        sql += "\n  AND occurred_at >= :start_at"
+        params['start_at'] = start_at
+    sql += "\nGROUP BY event_id"
 
-        result = await db.execute(query)
-        row = result.first()
+    result = await db.execute(text(sql), params)
+    stats: dict[str, ProxyMetric] = {event: ProxyMetric() for event in PROXY_TRACKED_EVENTS}
+    for row in result.mappings().all():
+        event_id = str(row.get('event_id') or '')
+        if not event_id:
+            continue
         stats[event_id] = ProxyMetric(
-            total=int(row.total or 0) if row else 0,
-            unique_users=int(row.unique_users or 0) if row else 0,
+            total=int(row.get('total') or 0),
+            unique_users=int(row.get('unique_users') or 0),
         )
-
     return stats
