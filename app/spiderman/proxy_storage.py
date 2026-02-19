@@ -29,7 +29,8 @@ PROXY_TRACKED_EVENTS = (
     PROXY_EVENT_NOT_WORKING_SUBMIT,
 )
 
-PROXY_BATCH_COOLDOWN_SECONDS = 60
+# Temporary testing value. Restore to 60 for production.
+PROXY_BATCH_COOLDOWN_SECONDS = 5
 PROXY_BATCH_DAILY_LIMIT = 10
 PROXY_BATCH_SIZE = 3
 
@@ -398,6 +399,8 @@ async def get_proxy_link_counts(db: AsyncSession) -> tuple[int, int]:
 async def check_proxy_batch_limits(
     db: AsyncSession,
     user_telegram_id: int,
+    *,
+    apply_cooldown: bool = True,
 ) -> tuple[bool, int, int]:
     await ensure_proxy_tables()
     now = datetime.now(UTC)
@@ -426,7 +429,7 @@ async def check_proxy_batch_limits(
     if daily_batches >= PROXY_BATCH_DAILY_LIMIT:
         return False, 0, remaining_daily
 
-    if last_issued_at is not None:
+    if apply_cooldown and last_issued_at is not None:
         cooldown_deadline = last_issued_at + timedelta(seconds=PROXY_BATCH_COOLDOWN_SECONDS)
         if cooldown_deadline > now:
             wait_seconds = int((cooldown_deadline - now).total_seconds()) + 1

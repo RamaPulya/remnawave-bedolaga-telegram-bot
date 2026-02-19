@@ -444,7 +444,11 @@ async def process_not_working_selection(callback: types.CallbackQuery, db_user, 
         button_text='proxy_not_working_submit',
     )
 
-    allowed, wait_seconds, daily_remaining = await check_proxy_batch_limits(db, callback.from_user.id)
+    allowed, wait_seconds, daily_remaining = await check_proxy_batch_limits(
+        db,
+        callback.from_user.id,
+        apply_cooldown=False,
+    )
     if not allowed:
         if daily_remaining <= 0:
             await callback.answer(
